@@ -22,6 +22,7 @@
 #include "diagnostics.h"
 #include "display_refresh.h"
 #include "graphics.h"
+#include "crash_report.h"
 #include "common/scope_exit.h"
 #include "core/core.h"
 #include "core/frontend/graphics_context.h"
@@ -649,6 +650,7 @@ void GraphicsWindow::OnFrameDisplayed() {
                             RoomPingMilliseconds());
 #endif
         ++frame_total;
+        Eden::Crash::FrameShown();  // the freeze watch (crash_report.h)
         // What a recorded controller session counts frames by (gameplay_test.h): the input
         // worker runs on another thread, so it reads a copy rather than the member.
         Display::gameplay_frame.store(frame_total, std::memory_order_relaxed);

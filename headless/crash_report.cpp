@@ -488,13 +488,18 @@ void WriteReport(const Kind* kind, int code, std::uint64_t address, const Regist
     Note("EDEN_CRASH the app did not start again; the system handles the crash\n");
 }
 
+// Set by the freeze watch just before it sends the GPU thread SIGABRT: the report says why.
+std::atomic<const char*> freeze_reason{nullptr};
+std::atomic<bool> game_running{false};
+
 void Handle(int signal, siginfo_t* info, void* context) {
     if (!Enter()) return;
     const Kind* kind = &kKinds[0];
     for (const Kind& candidate : kKinds)
         if (candidate.signal == signal) kind = &candidate;
+    const char* reason = signal == SIGABRT ? freeze_reason.load(std::memory_order_acquire) : nullptr;
     WriteReport(kind, info ? info->si_code : 0, info ? reinterpret_cast<std::uintptr_t>(info->si_addr) : 0,
-                FromContext(context), nullptr);
+                FromContext(context), reason);
     // Returning repeats the fault with the standard action in place.
     GiveUp();
 }
@@ -521,6 +526,53 @@ void Flusher() {
     WaitForReport();
     std::fflush(stderr);
     std::fflush(stdout);
+}
+
+// The freeze watch (crash_report.h, frames_shown). A game that stops showing frames while the app
+// runs on left no trace of where it stopped: the GPU thread now writes a report from where it is.
+// Should it not take the signal (a wait the system does not interrupt), the watch writes the
+// report itself after 10 s, which at least says the game froze.
+void FreezeWatch() {
+    unsigned limit = 30;
+    if (const char* value = std::getenv("EDEN_FREEZE_SECONDS")) limit = static_cast<unsigned>(std::strtoul(value, nullptr, 10));
+    if (limit == 0) return;
+    unsigned long long last = frames_shown.load(std::memory_order_relaxed);
+    unsigned still = 0;
+    bool armed = false;  // a frame was shown in this game
+    for (;;) {
+        Sleep(1000000);
+        if (state.load(std::memory_order_acquire) != kIdle) return;
+        const unsigned long long now = frames_shown.load(std::memory_order_relaxed);
+        if (!game_running.load(std::memory_order_acquire)) {
+            armed = false;
+            still = 0;
+            last = now;
+            continue;
+        }
+        if (now != last) {
+            last = now;
+            still = 0;
+            armed = true;
+            continue;
+        }
+        if (!armed || ++still < limit) continue;
+        std::uintptr_t gpu = 0;
+        for (const NamedThread& entry : named_threads)
+            if (!std::strcmp(entry.name, "GPU")) gpu = entry.thread.load(std::memory_order_acquire);
+        static char reason[96];
+        std::snprintf(reason, sizeof(reason), "frozen: no game frame for %u s; this is where the GPU thread was", limit);
+        std::fprintf(stderr, "EDEN_FREEZE no game frame for %u s, frames %llu; GPU thread 0x%lx\n", limit, now,
+                     static_cast<unsigned long>(gpu));
+        std::fflush(stderr);
+        freeze_reason.store(reason, std::memory_order_release);
+        if (gpu && pthread_kill((pthread_t)gpu, SIGABRT) == 0) {
+            for (int i = 0; i < 100 && state.load(std::memory_order_acquire) == kIdle; ++i) Sleep(100000);
+            if (state.load(std::memory_order_acquire) != kIdle) return;
+        }
+        std::snprintf(reason, sizeof(reason), "frozen: no game frame for %u s; the GPU thread %s", limit,
+                      gpu ? "did not take the signal" : "was not found");
+        Fail(reason);
+    }
 }
 
 void CopyText(char* target, std::size_t size, const char* text) noexcept {
@@ -561,6 +613,7 @@ void Install(const std::string& logs_folder, const char* app_version, bool resta
     if (!probe) probe_pipe[0] = probe_pipe[1] = -1;
     std::thread(Restarter).detach();
     std::thread(Flusher).detach();
+    std::thread(FreezeWatch).detach();
     struct sigaction action {};
     action.sa_sigaction = Handle;
     action.sa_flags = SA_SIGINFO;
@@ -577,7 +630,10 @@ void SetSession(const std::string& text, bool game) noexcept {
     CopyText(sessions[next], sizeof(sessions[next]), text.c_str());
     session_now.store(next, std::memory_order_release);
     if (game) game_started.store(true, std::memory_order_relaxed);
+    game_running.store(game, std::memory_order_release);
 }
+
+void GameStopping() noexcept { game_running.store(false, std::memory_order_release); }
 
 void Fail(const char* reason) noexcept {
     if (installed && Enter()) {

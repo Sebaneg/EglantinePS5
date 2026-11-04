@@ -1755,6 +1755,7 @@ int main(int argc, char** argv) {
                     pad->Consume({&neutral, 1});
                 }
                 // A game that ended itself or failed is being stopped too (stop_limit.h).
+                Eden::Crash::GameStopping();  // no frames from here on: not a freeze
                 Eden::StopLimit::Begin();
                 jit_list.Finish();  // while the JITs still exist: their block list is saved
                 // Shutdown requests cancellation before suspending cores; Pause can

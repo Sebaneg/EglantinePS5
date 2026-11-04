@@ -50,6 +50,13 @@ inline void NameThread(const char* name) noexcept {
     entry->thread.store(self, std::memory_order_release);
 }
 
+// Frames the game has shown, counted by the window (graphics.cpp) for the freeze watch: during a
+// game, once a frame was shown, 30 s with no other one count as frozen. The report is then written
+// on the GPU thread, so it shows where that thread waits. EDEN_FREEZE_SECONDS=<s> sets the time,
+// 0 turns the watch off.
+inline std::atomic<unsigned long long> frames_shown{0};
+inline void FrameShown() noexcept { frames_shown.fetch_add(1, std::memory_order_relaxed); }
+
 // How the launcher is told of a report: its launch error is this, followed by the report's path
 // (eglantineps5/eden_services.cpp).
 inline constexpr std::string_view kNotice = "crash-report:";
@@ -70,6 +77,9 @@ void Install(const std::string& logs_folder, const char* version, bool restarted
 // What is running, one line for the report. A game the user started also ends the watch for a
 // crash right after a restart (which closes the app instead of starting it over and over).
 void SetSession(const std::string& text, bool game) noexcept;
+
+// The game is being stopped: the freeze watch ends for this game.
+void GameStopping() noexcept;
 
 // The app found an error it cannot continue from (an exception nothing caught): the report says
 // why, then the same course as for a signal. Does not return.
