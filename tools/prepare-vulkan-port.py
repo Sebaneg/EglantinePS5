@@ -475,7 +475,7 @@ IMAGE_VALUES = 'ci.extent.width, ci.extent.height, ci.extent.depth, ci.arrayLaye
 BUFFER_VALUES = 'static_cast<unsigned long long>(ci.size), unsigned(ci.usage)'
 adapt('src/video_core/vulkan_common/vulkan_memory_allocator.cpp', 'vulkan_memory_allocator.cpp', [
     ('#include "video_core/vulkan_common/vulkan_memory_allocator.h"\n',
-     '#include "video_core/vulkan_common/vulkan_memory_allocator.h"\n#include <atomic>\n#include <cstddef>\n#include <cstdio>\n#include "performance.h"\nnamespace Common { void GuestMemoryUsage(std::size_t* span, std::size_t* held) noexcept; }\nextern "C" std::size_t eden_heap_committed(void);\n'),
+     '#include "video_core/vulkan_common/vulkan_memory_allocator.h"\n#include <atomic>\n#include <cstddef>\n#include <cstdio>\n#include "capped_layers.h"\n#include "performance.h"\nnamespace Common { void GuestMemoryUsage(std::size_t* span, std::size_t* held) noexcept; }\nextern "C" std::size_t eden_heap_committed(void);\n'),
     # What an image was that the allocator could not make at all, for stderr.log.
     ('    if (result != VK_SUCCESS) {\n        LOG_CRITICAL(Render_Vulkan, "Image {}x{}x{} ({} levels, {} layers, format {}) failed: {}",',
      """    if (result != VK_SUCCESS) {
@@ -501,23 +501,30 @@ adapt('src/video_core/vulkan_common/vulkan_memory_allocator.cpp', 'vulkan_memory
                      ci.extent.width, ci.extent.height, ci.extent.depth, ci.arrayLayers, ci.mipLevels, int(ci.format),
                      unsigned(ci.usage), unsigned(ci.flags), int(ci.tiling), int(sparse_result), int(second));
         if (second != VK_SUCCESS) {
-            // Once: which smaller sizes does the driver accept? Each probe is made and destroyed at once.
-            static std::atomic<bool> probed{false};
-            if (!probed.exchange(true)) {
-                for (u32 layers = ci.arrayLayers / 2; layers >= 1; layers /= 2) {
-                    VkImageCreateInfo probe = sparse_ci;
-                    probe.arrayLayers = layers;
-                    VkImage probe_image{};
-                    const VkResult probed_result =
-                        device.GetDispatchLoader().vkCreateImage(*device.GetLogical(), &probe, nullptr, &probe_image);
-                    std::fprintf(stderr, "EDEN_SPARSE_PROBE %u layers: %d\\n", layers, int(probed_result));
-                    if (probed_result == VK_SUCCESS) {
-                        device.GetDispatchLoader().vkDestroyImage(*device.GetLogical(), probe_image, nullptr);
-                    }
-                    if (layers == 1) break;
+            // The driver refuses sparse images past a size (8192x8192 BC6H: 34 layers refused, 17
+            // accepted). Make it with as many layers as it accepts, halving from what was asked;
+            // its views are kept inside those layers (headless/capped_layers.h). Nothing is bound
+            // to it and nothing is uploaded, so the layers left out read like the others.
+            const bool cube = (ci.flags & VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT) != 0;
+            sparse = VkImage{};
+            for (u32 layers = ci.arrayLayers / 2; layers >= (cube ? 6u : 1u); layers /= 2) {
+                VkImageCreateInfo smaller = sparse_ci;
+                smaller.arrayLayers = layers;
+                const VkResult made =
+                    device.GetDispatchLoader().vkCreateImage(*device.GetLogical(), &smaller, nullptr, &sparse);
+                std::fprintf(stderr, "EDEN_SPARSE_PROBE %u layers: %d\\n", layers, int(made));
+                if (made == VK_SUCCESS) {
+                    ::Eden::CappedLayers::Remember(sparse, ci.arrayLayers, layers);
+                    std::fprintf(stderr, "EDEN_SPARSE_CAPPED %ux%u, format %d: %u of %u layers\\n", ci.extent.width,
+                                 ci.extent.height, int(ci.format), layers, ci.arrayLayers);
+                    break;
                 }
+                sparse = VkImage{};
+                if (layers == 1) break;
             }
-            return vk::Image{};
+            if (!sparse) {
+                return vk::Image{};
+            }
         }
     }
 """),
@@ -1222,7 +1229,28 @@ probes = {
     # With custom border colours off (the console default), report which clamp-to-border
     # samplers ask for a colour the three standard ones cannot give exactly.
     'vk_texture_cache': [
-        ('#include <algorithm>', '#include <algorithm>\n#include <cstdio>\n#include "dev_vulkan.h"\n#include "diagnostics.h"'),
+        ('#include <algorithm>', '#include <algorithm>\n#include <cstdio>\n#include "capped_layers.h"\n#include "dev_vulkan.h"\n#include "diagnostics.h"'),
+        # Views of an array made with fewer layers than asked (headless/capped_layers.h) stay inside them.
+        ('        if (num_layers) {\n'
+         '            ci.subresourceRange.layerCount = *num_layers;\n'
+         '        }\n'
+         '        vk::ImageView handle = device->GetLogical().CreateImageView(ci);\n',
+         '        if (num_layers) {\n'
+         '            ci.subresourceRange.layerCount = *num_layers;\n'
+         '        }\n'
+         '        if (const u32 made = ::Eden::CappedLayers::Of(ci.image, static_cast<u32>(image.info.resources.layers))) {\n'
+         '            const bool cube = tex_type == TextureType::ColorCube || tex_type == TextureType::ColorArrayCube;\n'
+         '            ::Eden::CappedLayers::Clamp(ci.subresourceRange, made, cube ? 6u : 1u, VK_REMAINING_ARRAY_LAYERS);\n'
+         '        }\n'
+         '        vk::ImageView handle = device->GetLogical().CreateImageView(ci);\n'),
+        # Such an image has no memory by layer: binding it for the layers asked would go past its own.
+        ('        if (UsesSparseLayers(runtime_.device, info, gpu_addr_) && InitSparseLayers()) {\n',
+         '        if (!::Eden::CappedLayers::Of(*original_image, static_cast<u32>(info.resources.layers)) &&\n'
+         '            UsesSparseLayers(runtime_.device, info, gpu_addr_) &&\n'
+         '            InitSparseLayers()) {\n'),
+        ('Image::~Image() {\n',
+         'Image::~Image() {\n'
+         '    ::Eden::CappedLayers::Forget(*original_image);\n'),
         ('    has_custom_border_colors = samples_border && device.IsCustomBorderColorUsable();',
          '    if (::Eden::DevVulkan::trace_pipelines && samples_border) {\n'
          '        static std::vector<std::array<float, 4>> reported;\n'
