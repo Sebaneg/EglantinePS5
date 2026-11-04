@@ -63,6 +63,12 @@ pipeline_trace=on
 | `presentacion_hilo=on` / `off` | Envía las imágenes desde un hilo aparte (`off` es el normal). |
 | `imagenes=1` … `7` | Cuántas imágenes pueden ir en cola a la vez. Menos imágenes: menos ráfagas, pero puede ir más lento. |
 
+## Sincronización
+
+| Opción | Qué hace |
+|---|---|
+| `atajo=off` | Un canal de la GPU que espera una señal solo sigue cuando la señal tiene de verdad el valor esperado. Por defecto Eglantine lo deja seguir si la señal llegó a ese valor en algún momento (`CanResumeAcquire ... met semaphore` en `eden_log.txt`). Puede volver un congelamiento que ese atajo evitaba. |
+
 ## Diagnóstico de la GPU
 
 | Opción | Qué hace |

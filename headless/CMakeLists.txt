@@ -2365,6 +2365,26 @@ if(EDEN_PS5_OPENGL)
             "        while (!synced && !system.IsShuttingDown())\n            sync_cv.wait_for(lk, std::chrono::milliseconds(10));\n        if (system.IsShuttingDown()) return false;" command_source "${command_source}")
         string(REPLACE "    while (word != value) {" "    while (word != value && !dma_pusher.system.IsShuttingDown()) {" command_source "${command_source}")
         string(PREPEND command_source "#include <chrono>\n")
+        # Lab file atajo=off (dev_vulkan.h no_semaphore_latch): a channel suspended on a
+        # semaphore acquire resumes only when the value is there, not because a release met it
+        # once (Eglantine's latch). Mario Kart World lost the GPU 2-3 s after every such rescue.
+        if(unit STREQUAL "engines/puller")
+            set(latch_anchor_resume "    if (Nx2SemaphoreWaiters::Get().Latched(this)) {")
+            set(latch_anchor_suspend "        if (!waiters.Latched(this) && !acquire.Matches(ReadSemaphoreWord(dma_pusher, acquire.address))) {")
+            foreach(anchor latch_anchor_resume latch_anchor_suspend)
+                string(FIND "${command_source}" "${${anchor}}" latch_at)
+                if(latch_at LESS 0)
+                    message(FATAL_ERROR "Pinned semaphore latch changed: ${${anchor}}")
+                endif()
+            endforeach()
+            string(REPLACE "${latch_anchor_resume}"
+                "    if (!::Eden::DevVulkan::no_semaphore_latch && Nx2SemaphoreWaiters::Get().Latched(this)) {"
+                command_source "${command_source}")
+            string(REPLACE "${latch_anchor_suspend}"
+                "        if ((::Eden::DevVulkan::no_semaphore_latch || !waiters.Latched(this)) && !acquire.Matches(ReadSemaphoreWord(dma_pusher, acquire.address))) {"
+                command_source "${command_source}")
+            string(PREPEND command_source "#include \"${EDEN_PORT_DIR}/dev_vulkan.h\"\n")
+        endif()
         string(REPLACE "/" "_" unit_name "${unit}")
         write_derived("${PORT_BUILD_DIR}/${unit_name}.cpp" "${command_source}")
         list(REMOVE_ITEM video_sources "${unit}.cpp")

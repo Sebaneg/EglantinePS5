@@ -102,6 +102,7 @@ inline void Restore() {
     ::Settings::values.vsync_mode.SetValue(d.vsync);
     ::Settings::values.async_presentation.SetValue(d.async_presentation);
     DevVulkan::present_frames = 0;
+    DevVulkan::no_semaphore_latch = false;
 }
 
 // The lines of the lab file, without comments, blanks and trailing spaces.
@@ -169,6 +170,8 @@ inline bool ApplyEarly(const std::string& entry, bool& block_list_set) {
         ::Settings::values.gpu_clock.SetValue(entry.ends_with("normal") ? ::Settings::GpuClock::Normal
                                             : entry.ends_with("boost") ? ::Settings::GpuClock::Boost
                                                                        : ::Settings::GpuClock::Overclock);
+    else if (entry == "atajo=off") DevVulkan::no_semaphore_latch = true;
+    else if (entry == "atajo=on") DevVulkan::no_semaphore_latch = false;
     // The thread a freeze report shows (crash_report.cpp FreezeWatch): GPU unless named here.
     else if (entry.starts_with("congelamiento_hilo=") && entry.size() > 19)
         SetVariable("EDEN_FREEZE_THREAD", entry.c_str() + 19);

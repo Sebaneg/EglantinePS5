@@ -30,6 +30,9 @@ inline thread_local bool skip_next_dispatch = false;
 // Lab file imagenes=N: at most N presentation frames in flight (0: as many as the swapchain has,
 // up to Eden's 7).
 inline unsigned present_frames = 0;
+// Lab file atajo=off: a channel waiting on a semaphore resumes only once the value is really
+// there, not because a release met it at some point (Eglantine's latch, engines/puller.cpp).
+inline bool no_semaphore_latch = false;
 // Standard border colours only (no RADV border table). On by default: with custom colours
 // some games fault the GPU at page 0. Not the driver: RADV's custom border colours read back
 // exactly on the console; the cause is open. The three
