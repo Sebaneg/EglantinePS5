@@ -26,15 +26,12 @@ int __real_sceKernelAllocateDirectMemory(int64_t, int64_t, size_t, size_t, int, 
 int __real_sceKernelReleaseDirectMemory(int64_t, size_t);
 int64_t sceKernelGetDirectMemorySize(void);
 
-// Forzar la declaración débil de la limpieza del driver gráfico / texturas para evitar crashes por fragmentación
-extern void evict_all_unused_textures(void) __attribute__((weak));
-
 #define EDEN_DIRECT_STEP ((int64_t)2 << 20)       /* blocks at the top are placed in 2 MiB steps */
 #define EDEN_DIRECT_SMALL ((size_t)2 << 20)       /* a thread's stack; the driver's zero block */
 
 static atomic_flag eden_direct_lock = ATOMIC_FLAG_INIT;
 static int64_t eden_direct_floor;                 /* the lowest block taken at the top; 0: none yet */
-static int64_t eden_direct_holes[4096];           /* 2 MiB blocks given back above the floor */
+static int64_t eden_direct_holes[1024];           /* 2 MiB blocks given back above the floor */
 static unsigned eden_direct_hole_count;
 
 static void eden_direct_acquire(void) {
@@ -68,28 +65,12 @@ int eden_direct_high(size_t size, size_t alignment, int type, int64_t *start) {
     }
   }
   eden_direct_release();
-  
-  // Intento final en cualquier parte de la memoria
-  int res = __real_sceKernelAllocateDirectMemory(0, total, size, alignment, type, start);
-  
-  // SI ENTRA EN OUT OF MEMORY: Activar el recolector de basura de emergencia y reintentar
-  if (res != 0 && evict_all_unused_textures) {
-    evict_all_unused_textures();
-    res = __real_sceKernelAllocateDirectMemory(0, total, size, alignment, type, start);
-  }
-  return res;
+  return __real_sceKernelAllocateDirectMemory(0, total, size, alignment, type, start);
 }
 
 /* As the system places it: for what a session takes and gives back. */
 int eden_direct_low(size_t size, size_t alignment, int type, int64_t *start) {
-  int res = __real_sceKernelAllocateDirectMemory(0, sceKernelGetDirectMemorySize(), size, alignment, type, start);
-  
-  // Emergencia para asignaciones de baja prioridad / texturas dinámicas
-  if (res != 0 && evict_all_unused_textures) {
-    evict_all_unused_textures();
-    res = __real_sceKernelAllocateDirectMemory(0, sceKernelGetDirectMemorySize(), size, alignment, type, start);
-  }
-  return res;
+  return __real_sceKernelAllocateDirectMemory(0, sceKernelGetDirectMemorySize(), size, alignment, type, start);
 }
 
 /* The Vulkan driver makes its command ring (16 MiB) and, right after it, the ring's marker page
@@ -121,15 +102,7 @@ int __wrap_sceKernelAllocateDirectMemory(int64_t from, int64_t to, size_t size, 
   if (from == 0 && start && to >= sceKernelGetDirectMemorySize() &&
       (size == EDEN_DIRECT_SMALL || eden_direct_driver_keeps(size, __builtin_return_address(0))))
     return eden_direct_high(size, alignment, type, start);
-    
-  int res = __real_sceKernelAllocateDirectMemory(from, to, size, alignment, type, start);
-  
-  // Interceptores globales del Wrapper ante fallos del Kernel
-  if (res != 0 && evict_all_unused_textures) {
-    evict_all_unused_textures();
-    res = __real_sceKernelAllocateDirectMemory(from, to, size, alignment, type, start);
-  }
-  return res;
+  return __real_sceKernelAllocateDirectMemory(from, to, size, alignment, type, start);
 }
 
 int __wrap_sceKernelReleaseDirectMemory(int64_t start, size_t size) {
