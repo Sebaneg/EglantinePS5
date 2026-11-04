@@ -1,0 +1,47 @@
+diff --git a/src/core/arm/dynarmic/window_trace.h b/src/core/arm/dynarmic/window_trace.h
+index 249e6cd97..96bcfd0c6 100644
+--- a/src/core/arm/dynarmic/window_trace.h
++++ b/src/core/arm/dynarmic/window_trace.h
+@@ -99,17 +99,25 @@ private:
+ class Sessions {
+ public:
+     void Reset(const Kernel::KProcess* owner, u64 base) {
+-        current.store(base != 0 ? std::make_shared<Session>(owner, base, next_id.fetch_add(1))
+-                                : nullptr);
++        auto session = base != 0 ? std::make_shared<Session>(owner, base, next_id.fetch_add(1))
++                                 : nullptr;
++        std::scoped_lock lock{current_mutex};
++        current.swap(session);
+     }
+ 
+     std::shared_ptr<Session> Find(const Kernel::KProcess* owner) const {
+-        auto session = current.load();
++        std::shared_ptr<Session> session;
++        {
++            std::scoped_lock lock{current_mutex};
++            session = current;
++        }
+         return session && session->owner == owner ? session : nullptr;
+     }
+ 
+ private:
+-    std::atomic<std::shared_ptr<Session>> current;
++    // The PS5's libc++ has no std::atomic<std::shared_ptr>.
++    mutable std::mutex current_mutex;
++    std::shared_ptr<Session> current;
+     std::atomic<u64> next_id{1};
+ };
+ 
+diff --git a/src/core/hle/service/nx2_gsv.h b/src/core/hle/service/nx2_gsv.h
+index 85dfd02a9..2790fed81 100644
+--- a/src/core/hle/service/nx2_gsv.h
++++ b/src/core/hle/service/nx2_gsv.h
+@@ -2430,7 +2430,7 @@ private:
+                         vsync_state->trace_late_callbacks +=
+                             VblankInterval.count() > 0 && late >= VblankInterval;
+                         vsync_state->trace_max_late =
+-                            (std::max)(vsync_state->trace_max_late, late.count());
++                            (std::max)(vsync_state->trace_max_late, static_cast<s64>(late.count()));
+                         if (vsync_state->trace_last_callback) {
+                             const s64 gap = observed - *vsync_state->trace_last_callback;
+                             vsync_state->trace_min_gap = vsync_state->trace_min_gap
