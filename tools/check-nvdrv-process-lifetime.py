@@ -22,12 +22,15 @@ struct Mapper {DAddr GetRegionStart(){return 4096;}size_t GetRegionSize(){return
 struct Session {SessionId id;Kernel::KProcess* process;Core::Asid asid;bool has_preallocated_area{};std::unique_ptr<Mapper> mapper;bool is_active{};int ref_count{};Session(SessionId i,Kernel::KProcess*p,Core::Asid a):id(i),process(p),asid(a){}};
 struct Smmu {std::vector<Kernel::KProcess*> owners;Core::Asid RegisterProcess(int*p){for(size_t i=0;i<owners.size();++i)if(&owners[i]->memory==p){owners[i]->registered=true;return {i};}assert(false);return{};}void UnregisterProcess(Core::Asid a){assert(owners[a.id]->refs);owners[a.id]->registered=false;}void Free(DAddr,size_t){}};
 struct SystemType {int Kernel(){return 0;}};
+Smmu* registry_smmu;
+namespace Devices {struct Nx2GpuMemoryRegistry {static Nx2GpuMemoryRegistry& Get(){static Nx2GpuMemoryRegistry r;return r;} int forgotten=0; void ForgetDeviceRanges(size_t asid){assert(registry_smmu->owners[asid]->registered);++forgotten;}};}
 struct Host {Smmu smmu;SystemType sys;Smmu& MemoryManager(){return smmu;}SystemType& System(){return sys;}};
 struct Impl {std::mutex session_guard;std::deque<Session> sessions;std::deque<size_t> id_pool;size_t new_ids=0;Host host1x;struct File{Impl*p;void UnmapAllHandles(SessionId id){assert(p->sessions[id.id].process->refs>0);assert(p->sessions[id.id].process->memory==7);}} file{this};};
 struct Container {Impl storage;Impl*impl=&storage;SessionId OpenSession(Kernel::KProcess*);void CloseSession(SessionId);};
 '''+opening+closing+r'''
 int main(){
  Container c;Kernel::KProcess p,q;c.impl->host1x.smmu.owners={&p,&q};
+ registry_smmu=&c.impl->host1x.smmu;
  auto a=c.OpenSession(&p),b=c.OpenSession(&p);assert(a.id==b.id && p.refs==2);
  p.Close(0);assert(p.refs==1);c.CloseSession(a);assert(p.refs==1 && p.registered);
  c.CloseSession(b);assert(p.refs==0 && !p.registered);

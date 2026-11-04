@@ -74,7 +74,14 @@ assert 'GPU::~GPU() { impl->NotifyShutdown(); }' in gpu
 shutdown = gpu.split('    void NotifyShutdown() {', 1)[1].split('    /// Obtain', 1)[0]
 assert 'sync_cv.notify_all();\n        }\n        gpu_thread.Stop();' in shutdown
 assert shutdown.index('gpu_thread.Stop();') < shutdown.index('sync_requests.clear();') < shutdown.index('sync_requests_stopped = true;')
-assert '~Impl() { gpu_thread.Stop(); if (renderer && Settings::IsOpenGL()) { renderer->Context().MakeCurrent(); glFinish(); } }' in gpu
+gl_finish = 'if (renderer && Settings::IsOpenGL()) { renderer->Context().MakeCurrent(); glFinish(); }'
+if '~Impl() = default;' in (root / 'Eglantine/src/video_core/gpu.cpp').read_text():
+    assert '~Impl() { gpu_thread.Stop(); ' + gl_finish + ' }' in gpu
+else:
+    # Newer Eden's destructor: NotifyShutdown (which stops the worker, above), the OpenGL context
+    # finishing its work, then the renderer.
+    destructor = gpu.split('    ~Impl() {\n', 1)[1].split('\n    }\n', 1)[0]
+    assert destructor.index('NotifyShutdown();') < destructor.index(gl_finish) < destructor.index('renderer.reset();')
 core = (cache / 'native-local/headless/core.cpp').read_text()
 shutdown_core = core.split('    void ShutdownMainProcess() {', 1)[1].split('    bool IsShuttingDown()', 1)[0]
 assert shutdown_core.index('gpu_core->NotifyShutdown()') < shutdown_core.index('services.reset()') < shutdown_core.index('gpu_core.reset()')

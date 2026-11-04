@@ -17,15 +17,30 @@ file(GLOB ampere_tests CONFIGURE_DEPENDS "${EDEN_SOURCE}/src/tests/video_core/am
 # These two integration tests link the complete shader compiler and run in upstream tests.
 # This host check exercises the header-only native capture/lowering and memory helpers.
 list(FILTER ampere_tests EXCLUDE REGEX "ampere_(bindless_tex|sured)\\.cpp$")
-add_executable(nx2-core-check ${ampere_tests}
-    "${EDEN_SOURCE}/src/tests/core/read_traps.cpp"
-    "${EDEN_SOURCE}/src/tests/core/nx2_readback_cache.cpp"
-    "${EDEN_SOURCE}/src/tests/core/nx2_core_readback_capacity.cpp"
-    "${EDEN_SOURCE}/src/tests/video_core/nx2_gpu_mappings.cpp"
-    "${EDEN_SOURCE}/src/tests/video_core/nx2_command_ranges.cpp"
-    "${EDEN_SOURCE}/src/tests/video_core/nx2_command_sync.cpp"
-    "${EDEN_SOURCE}/src/tests/video_core/nx2_sparse_region.cpp"
-    "${EDEN_SOURCE}/src/tests/video_core/memory_budget.cpp")
+# Newer Eglantine has more tests that translate or emit whole programs: they need the
+# compiled shader compiler too.
+foreach(test IN LISTS ampere_tests)
+    file(READ "${test}" test_source)
+    if(test_source MATCHES "#include \"shader_recompiler/(backend|frontend/maxwell|ir_opt|object_pool|host_translate_info)")
+        list(REMOVE_ITEM ampere_tests "${test}")
+    endif()
+endforeach()
+# Newer Eglantine dropped these; the check takes those its source still has.
+set(core_tests)
+foreach(test core/read_traps core/nx2_readback_cache core/nx2_core_readback_capacity
+        video_core/nx2_gpu_mappings video_core/nx2_command_ranges video_core/nx2_command_sync
+        video_core/nx2_sparse_region video_core/memory_budget)
+    if(EXISTS "${EDEN_SOURCE}/src/tests/${test}.cpp")
+        list(APPEND core_tests "${EDEN_SOURCE}/src/tests/${test}.cpp")
+    endif()
+endforeach()
+list(LENGTH ampere_tests ampere_count)
+list(LENGTH core_tests core_count)
+message(STATUS "nx2 core check: ${ampere_count} Ampere and ${core_count} core tests")
+if(ampere_count EQUAL 0)
+    message(FATAL_ERROR "No header-only Ampere tests left to run")
+endif()
+add_executable(nx2-core-check ${ampere_tests} ${core_tests})
 file(GLOB boost_includes "${DEPENDENCY_SOURCE}/.cache/cpm/boost/*/libs/*/include")
 target_include_directories(nx2-core-check PRIVATE "${EDEN_SOURCE}/src" "${FMT_INCLUDE}" ${boost_includes})
 target_link_libraries(nx2-core-check PRIVATE Catch2::Catch2WithMain)
