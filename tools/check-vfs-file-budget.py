@@ -16,11 +16,14 @@ def policy(source):
 
 start = adapted.index('std::unique_lock<std::mutex> RealVfsFilesystem::RefreshReference(')
 methods = adapted[start:adapted.index('\nRealVfsFile::RealVfsFile(', start)]
+# Newer Eglantine also forgets the path's cache entry when its last reference goes.
+drop_takes_path = 'DropReference(std::unique_ptr<FileReference>&& reference,\n' in methods
 program = r'''
 #include <algorithm>
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -62,7 +65,8 @@ struct RealVfsFilesystem {
     size_t num_open_files = 0;
     bool in_dtor = false;
     std::unique_lock<std::mutex> RefreshReference(const std::string&, OpenMode, FileReference&);
-    void DropReference(std::unique_ptr<FileReference>&&);
+    std::map<std::string, std::weak_ptr<void>> cache;
+    DROP_DECLARATION
     void EvictSingleReferenceLocked();
     void InsertReferenceIntoListLocked(FileReference&);
     void RemoveReferenceFromListLocked(FileReference&);
@@ -94,11 +98,14 @@ int main(int argc, char** argv) {
         auto lock = fs.RefreshReference(argv[1], FileSys::OpenMode::Read, *refs.front());
         assert(refs.front()->file && std::fgetc(refs.front()->file->handle) == 'X');
     }
-    for (auto& ref : refs) { fs.DropReference(std::move(ref)); ref.reset(); }
+    for (auto& ref : refs) { fs.DropReference(std::move(ref)DROP_PATH); ref.reset(); }
     assert(live_files == 0 && fs.num_open_files == 0);
     for (auto file : reserved) std::fclose(file);
 }
-'''.replace('METHODS', methods)
+'''.replace('METHODS', methods).replace(
+    'DROP_DECLARATION', 'void DropReference(std::unique_ptr<FileReference>&&, const std::string&);'
+    if drop_takes_path else 'void DropReference(std::unique_ptr<FileReference>&&);').replace(
+    'DROP_PATH', ', argv[1]' if drop_takes_path else '')
 with tempfile.TemporaryDirectory(prefix='eden-vfs-budget-') as temporary:
     folder = Path(temporary)
     (folder / 'common').mkdir()
