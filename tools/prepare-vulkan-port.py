@@ -1127,6 +1127,25 @@ for name in ('vk_graphics_pipeline', 'vk_compute_pipeline'):
 shader_costs = [
     ('#include <algorithm>', '#include <algorithm>\n#include <cstdio>\n#include <unordered_set>\n'
      '#include "performance.h"\n#include "dev_vulkan.h"\n#include "diagnostics.h"'),
+    # Lab switch teselacion=off (dev_vulkan.h skip_tessellation): draws with tessellation
+    # stages are not recorded, to tell whether they are what hangs the GPU.
+    ('    if (!RefreshStages(graphics_key.unique_hashes)) {\n'
+     '        current_pipeline = nullptr;\n'
+     '        return nullptr;\n'
+     '    }\n',
+     '    if (!RefreshStages(graphics_key.unique_hashes)) {\n'
+     '        current_pipeline = nullptr;\n'
+     '        return nullptr;\n'
+     '    }\n'
+     '    if (::Eden::DevVulkan::skip_tessellation &&\n'
+     '        (graphics_key.unique_hashes[2] != 0 || graphics_key.unique_hashes[3] != 0)) {\n'
+     '        static std::atomic<unsigned long long> skipped{0};\n'
+     '        if (skipped.fetch_add(1, std::memory_order_relaxed) == 0) {\n'
+     '            ::Eden::Report("laboratorio", "teselacion=off: draws with tessellation are skipped");\n'
+     '        }\n'
+     '        current_pipeline = nullptr;\n'
+     '        return nullptr;\n'
+     '    }\n'),
     # Development crash probes: report each pipeline's first use (stage hashes) to klog,
     # which survives a GPU fault that kills the title.
     ('    current_pipeline = pipeline.get();\n    current_pipeline->MarkUsed(frame_count);\n    return BuiltPipeline(current_pipeline);\n}',

@@ -13,6 +13,9 @@ inline bool disable_multi_range = false; // bind multi-range SSBOs the pre-2026 
 // bound them (16384x16384 masks) hung the GPU within seconds, and the console with it, so that
 // only holding the power button ended it. Lab file: dispersas=on.
 inline bool sparse_tiles = false;
+// Lab file teselacion=off: draws with tessellation stages are skipped. Mario Kart World hung the
+// GPU about two seconds after its first tessellation pipelines, with or without sparse images.
+inline bool skip_tessellation = false;
 // Standard border colours only (no RADV border table). On by default: with custom colours
 // some games fault the GPU at page 0. Not the driver: RADV's custom border colours read back
 // exactly on the console; the cause is open. The three

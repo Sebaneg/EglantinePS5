@@ -1,0 +1,93 @@
+# Modo laboratorio
+
+El modo laboratorio deja probar opciones en la consola **sin compilar otra versión**. Las opciones
+van en un archivo de texto:
+
+```
+/data/eglantineps5/laboratorio.txt
+```
+
+- Una opción por línea. Lo que va después de `#` es un comentario.
+- La app lee el archivo **antes de cada partida**: cambias el archivo (por FTP, por ejemplo),
+  vuelves a la biblioteca, empiezas el juego otra vez y ya está.
+- Una opción que quitas del archivo vuelve a su valor normal en la siguiente partida. Solo los
+  filtros de registro (`log=`, `log_filter=`) duran hasta que se cierra la app.
+- El registro de la partida (`eden_log.txt` y `stderr.log`) dice cada opción que leyó:
+  `laboratorio: applied: ...`, o `unknown, ignored: ...` si una línea no se entiende.
+- Sin archivo, la app funciona como siempre.
+
+Ejemplo:
+
+```
+# Mario Kart World: ¿la teselación cuelga la GPU?
+teselacion=off
+pipeline_trace=on
+```
+
+> **Cuidado:** algunas opciones pueden colgar la GPU. Si la consola deja de responder, mantén
+> pulsado el botón de encendido unos 10-15 segundos. Prueba **una sola opción nueva cada vez**: si
+> cambias varias a la vez, no se sabe cuál hizo efecto.
+
+## Gráficos (GPU)
+
+| Opción | Qué hace |
+|---|---|
+| `teselacion=off` | No dibuja lo que usa teselación (terreno, agua...). Faltarán partes de la escena; sirve para saber si la teselación cuelga la GPU. |
+| `dispersas=on` | Activa las texturas "dispersas" gigantes de Eglantine (vienen apagadas: colgaron la consola). |
+| `sparse=off` | Apaga toda la memoria "dispersa" de la GPU (más drástico que lo anterior). |
+| `multirange=off` | Une los búferes de varios trozos a la manera antigua. |
+| `null_descriptor=off` | Sin descriptores nulos. |
+| `descriptor_buffer=off` | Sin búferes de descriptores. |
+| `robustness2=on` | Accesos de la GPU fuera de rango, seguros (más lento). |
+| `custom_border=on` / `off` | Colores de borde de textura propios (vienen apagados: algunos juegos fallaban). |
+| `conditional_rendering=off` / `on` | Dibujo condicional por la GPU. |
+| `hcr=eden` / `exact` / `cpu` | Cómo se decide el dibujo condicional (`exact` es el normal). |
+| `compute_barriers=off` | Quita las barreras de sincronización de los cálculos de la GPU. |
+| `vertex_input_dynamic=off` | Sin entrada de vértices dinámica. |
+| `dyna_state=0` … `3` | Nivel de estado dinámico extendido. |
+| `astc=cpu` / `gpu` | Dónde se descomprimen las texturas ASTC. |
+| `vram=aggressive` / `conservative` | Cuánta memoria gráfica usa (aggressive es el normal). |
+| `gpu_clock=normal` / `boost` / `overclock` | Velocidad de la GPU que ve el juego. |
+| `gc_dirty=upstream` | Libera antes las texturas que escribió la GPU. |
+| `graphics_usage=driver` | Mide la memoria gráfica como la cuenta el controlador. |
+| `dispatch_draws=8` … `512` | Dibujos entre entregas al hilo de Vulkan (potencia de 2). |
+
+## Diagnóstico de la GPU
+
+| Opción | Qué hace |
+|---|---|
+| `pipeline_trace=on` | Anota cada programa gráfico la primera vez que se usa. El último antes de un cuelgue es el sospechoso. |
+| `submit_sync=on` | Espera a la GPU después de cada envío. Muy lento, pero el cuelgue queda en el envío exacto. |
+| `gpu_time=on` | Mide el tiempo de la GPU de cada envío. |
+| `radv_debug=...` | Opciones del controlador gráfico, separadas por comas. Por ejemplo `radv_debug=syncshaders` (espera a cada programa) o `radv_debug=nodcc,nohiz` (sin compresiones). |
+| `env=NOMBRE=valor` | Cualquier otra variable del controlador. No cambies las que pone la propia app. |
+
+## Velocidad y precisión
+
+Estas se aplican **después** de los ajustes del juego (Ajustes > Rendimiento), así que mandan sobre ellos.
+
+| Opción | Qué hace |
+|---|---|
+| `async_shaders=on` / `off` | Programas gráficos en segundo plano. |
+| `reactive_flushing=on` / `off` | Vaciado reactivo. |
+| `skip_invalidation=on` / `off` | Saltar invalidaciones de la CPU. |
+| `gpu_accuracy=low` / `high` | Precisión de la GPU (`low` = GPU rápida). |
+| `cpu_accuracy=unsafe` / `auto` | Precisión de la CPU. |
+| `dma_accuracy=unsafe` / `default` | Precisión de las copias de memoria. |
+
+## CPU y memoria
+
+| Opción | Qué hace |
+|---|---|
+| `jit_list=on` / `off` | La lista de bloques de código ya traducidos (manda sobre Ajustes). |
+| `jit_shared=off` | Cada núcleo traduce su propio código. |
+| `fastmem=on` / `off` | Acceso directo a la memoria del juego (en la consola suele ir más lento). |
+| `cache_spin=N` | Intentos antes de que un núcleo duerma esperando a la caché de la GPU. |
+| `idle_spin_us=N` | Microsegundos que un núcleo espera activo antes de dormir. |
+
+## Registros
+
+| Opción | Qué hace |
+|---|---|
+| `log=render` | Registro detallado de los gráficos. |
+| `log_filter=...` | Cualquier filtro de Eden, con `+` en lugar de espacios: `log_filter=*:Info+Render.Vulkan:Debug`. |

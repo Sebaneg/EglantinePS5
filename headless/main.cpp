@@ -56,6 +56,7 @@
 #include "extracted_game.h"
 #include "cache_budget.h"
 #include "performance.h"
+#include "lab.h"
 #include "stall_watchdog.h"
 #include "dev_vulkan.h"
 #include "../src/fastmem.h"
@@ -750,32 +751,14 @@ int main(int argc, char** argv) {
         Settings::values.memory_layout_mode = Settings::MemoryLayout::Memory_4Gb;
         // A development run that names jit_list in dev-settings decides the block list by itself.
         [[maybe_unused]] bool dev_block_list = false;  // read where a session applies its settings
-        // Lab file (/data/eglantineps5/laboratorio.txt): switches a player can try on the console
-        // without a new build, one per line, read before each game. Unknown lines are reported.
-        {
-            Eden::DevVulkan::sparse_tiles = false;
-            std::ifstream lab(std::string{Eden::kDataDir} + "/laboratorio.txt");
-            for (std::string entry; std::getline(lab, entry);) {
-                while (!entry.empty() && (entry.back() == '\r' || entry.back() == ' ')) entry.pop_back();
-                if (entry.empty() || entry[0] == '#') continue;
-                bool known = true;
-                if (entry == "dispersas=on") {
-                    Eden::DevVulkan::sparse_tiles = true;
-                } else if (entry == "dispersas=off") {
-                    Eden::DevVulkan::sparse_tiles = false;
-                } else if (entry == "sparse=off") {
-                    Eden::DevVulkan::disable_sparse = true;
-                } else if (entry.starts_with("radv_debug=")) {
-                    setenv("RADV_DEBUG", entry.c_str() + 11, 1);
-                } else if (entry.starts_with("env=") && entry.find('=', 4) != std::string::npos) {
-                    const auto split = entry.find('=', 4);
-                    setenv(entry.substr(4, split - 4).c_str(), entry.c_str() + split + 1, 1);
-                } else {
-                    known = false;
-                }
-                Eden::Report("laboratorio", ((known ? "applied: " : "unknown, ignored: ") + entry).c_str());
-            }
-        }
+        // Lab file (headless/lab.h, docs/LABORATORIO.md): switches a player tries on the console
+        // without a new build, read before each game. The speed ones apply after the session's own
+        // settings, further down.
+        Eden::Lab::Restore();
+        const std::vector<std::string> lab_entries = Eden::Lab::Read();
+        std::vector<bool> lab_known(lab_entries.size(), false);
+        for (std::size_t i = 0; i < lab_entries.size(); ++i)
+            lab_known[i] = Eden::Lab::ApplyEarly(lab_entries[i], dev_block_list);
 #ifdef EDEN_DEV_PROFILE
         // One-run A/B switches written by the development runner; absent = defaults.
         {
@@ -1073,6 +1056,11 @@ int main(int argc, char** argv) {
             // The block list is off unless the settings turn it on (block-list.txt in the app
             // folder still does, further down).
             if (!dev_block_list) Eden::JitList::enabled = speed.block_list;
+            for (std::size_t i = 0; i < lab_entries.size(); ++i) {
+                if (Eden::Lab::ApplyLate(lab_entries[i])) lab_known[i] = true;
+                Eden::Report("laboratorio", ((lab_known[i] ? "applied: " : "unknown, ignored: ") +
+                                             lab_entries[i]).c_str());
+            }
             // The report reads the values back: what the emulator has, whoever set it.
             const auto on = [](bool value) { return value ? "on" : "off"; };
             Eden::Report("launch", (std::string("Performance: block list ") + on(Eden::JitList::enabled) +
