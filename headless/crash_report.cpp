@@ -71,6 +71,7 @@ std::atomic<bool> game_started{false};
 
 bool installed = false;
 bool restarted_process = false;
+bool gpu_lost = false;  // the report is for a lost GPU device: the app closes
 std::time_t started_at = 0;
 long utc_offset = 0;
 char logs[200];
@@ -395,7 +396,9 @@ void Compose(const Kind* kind, int code, std::uint64_t address, const Registers&
     t.Put(" (eboot+offset is an address in the build's llvm-pie.elf)\n");
     t.Put("calls found on the stack, most recent first (\"?\": not checked against a call instruction):\n");
     PutCalls(r.rsp);
-    t.Put(restart ? "then: the app starts again\n" : "then: the app closes (it had just started again after a crash)\n");
+    t.Put(restart    ? "then: the app starts again\n"
+          : gpu_lost ? "then: the app closes (the GPU hung; restart the console if its menu does not respond)\n"
+                     : "then: the app closes (it had just started again after a crash)\n");
 }
 
 bool WriteFile(const char* path, const char* data, std::size_t size) noexcept {
@@ -440,8 +443,11 @@ void WriteReport(const Kind* kind, int code, std::uint64_t address, const Regist
                  const char* reason) noexcept {
     // Right after a restart, with no game started since: the crash comes with starting the app,
     // and starting it again would only repeat it.
-    const bool restart = !(restarted_process && !game_started.load(std::memory_order_relaxed) &&
-                           std::time(nullptr) - started_at < 60);
+    // A lost GPU device (the GPU hung) can leave the console's graphics stuck: the app started
+    // again then froze on its first frame, and so did the system's own menu. Close instead.
+    gpu_lost = reason != nullptr && std::strstr(reason, "DEVICE_LOST") != nullptr;
+    const bool restart = !gpu_lost && !(restarted_process && !game_started.load(std::memory_order_relaxed) &&
+                                        std::time(nullptr) - started_at < 60);
     leave.store(!restart, std::memory_order_release);
     const Stamp stamp = LocalNow();
     Compose(kind, code, address, registers, reason, stamp, restart);

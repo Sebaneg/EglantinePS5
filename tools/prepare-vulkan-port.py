@@ -1291,6 +1291,14 @@ probes = {
         ('Image::~Image() {\n',
          'Image::~Image() {\n'
          '    ::Eden::CappedLayers::Forget(*original_image);\n'),
+        # Large Switch 2 sparse images bound tile by tile (dev_vulkan.h sparse_tiles): off unless
+        # the lab file turns them on. Such images are then made as before (unbacked, or capped).
+        ('    if (!device.IsSparseResidencyImage2DSupported()) {\n'
+         '        return SparseTilesMode::None;\n'
+         '    }\n',
+         '    if (!device.IsSparseResidencyImage2DSupported() || !::Eden::DevVulkan::sparse_tiles) {\n'
+         '        return SparseTilesMode::None;\n'
+         '    }\n'),
         ('    has_custom_border_colors = samples_border && device.IsCustomBorderColorUsable();',
          '    if (::Eden::DevVulkan::trace_pipelines && samples_border) {\n'
          '        static std::vector<std::array<float, 4>> reported;\n'

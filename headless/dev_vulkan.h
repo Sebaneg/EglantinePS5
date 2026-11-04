@@ -9,6 +9,10 @@ inline bool robustness2 = false; // robustBufferAccess2 + robustImageAccess2
 inline bool trace_pipelines = false; // report first pipeline uses to klog
 inline bool disable_sparse = false; // no sparse binding: multi-range SSBOs are gathered copies
 inline bool disable_multi_range = false; // bind multi-range SSBOs the pre-2026 way
+// Large sparse images bound tile by tile (Eglantine's InitSparseTiles). Off: the first game that
+// bound them (16384x16384 masks) hung the GPU within seconds, and the console with it, so that
+// only holding the power button ended it. Lab file: dispersas=on.
+inline bool sparse_tiles = false;
 // Standard border colours only (no RADV border table). On by default: with custom colours
 // some games fault the GPU at page 0. Not the driver: RADV's custom border colours read back
 // exactly on the console; the cause is open. The three

@@ -750,6 +750,32 @@ int main(int argc, char** argv) {
         Settings::values.memory_layout_mode = Settings::MemoryLayout::Memory_4Gb;
         // A development run that names jit_list in dev-settings decides the block list by itself.
         [[maybe_unused]] bool dev_block_list = false;  // read where a session applies its settings
+        // Lab file (/data/eglantineps5/laboratorio.txt): switches a player can try on the console
+        // without a new build, one per line, read before each game. Unknown lines are reported.
+        {
+            Eden::DevVulkan::sparse_tiles = false;
+            std::ifstream lab(std::string{Eden::kDataDir} + "/laboratorio.txt");
+            for (std::string entry; std::getline(lab, entry);) {
+                while (!entry.empty() && (entry.back() == '\r' || entry.back() == ' ')) entry.pop_back();
+                if (entry.empty() || entry[0] == '#') continue;
+                bool known = true;
+                if (entry == "dispersas=on") {
+                    Eden::DevVulkan::sparse_tiles = true;
+                } else if (entry == "dispersas=off") {
+                    Eden::DevVulkan::sparse_tiles = false;
+                } else if (entry == "sparse=off") {
+                    Eden::DevVulkan::disable_sparse = true;
+                } else if (entry.starts_with("radv_debug=")) {
+                    setenv("RADV_DEBUG", entry.c_str() + 11, 1);
+                } else if (entry.starts_with("env=") && entry.find('=', 4) != std::string::npos) {
+                    const auto split = entry.find('=', 4);
+                    setenv(entry.substr(4, split - 4).c_str(), entry.c_str() + split + 1, 1);
+                } else {
+                    known = false;
+                }
+                Eden::Report("laboratorio", ((known ? "applied: " : "unknown, ignored: ") + entry).c_str());
+            }
+        }
 #ifdef EDEN_DEV_PROFILE
         // One-run A/B switches written by the development runner; absent = defaults.
         {

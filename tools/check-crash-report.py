@@ -178,6 +178,11 @@ int main(int argc, char** argv) {
     if (mode == "readable") return ReadableCheck();
     if (mode != "again")
         Eden::Crash::SetSession("game Test.nsp (0100000000000000), Vulkan, resolution 2x, AMD FSR", true);
+    if (mode == "gpu-lost")
+        std::thread([] {
+            Eden::Crash::NameThread("GPUFencingThread");
+            Eden::Crash::Fail("VK_ERROR_DEVICE_LOST");
+        }).join();
     if (mode == "abort") std::abort();
     if (mode == "ill") __builtin_trap();
     if (mode == "throw")
@@ -314,6 +319,13 @@ def check(binary, console):
     assert status == 42 and 'what: the app stopped itself\nreason: test exception: nothing caught it\n' in report, \
         (status, report[:400], err[-400:])
     assert '\nthread: Thrower (0x' in report and note.endswith(' 1\n')
+
+    # The GPU hung: the app closes, as starting it again froze on the console's stuck graphics.
+    status, out, err, reports, note = run(binary, 'gpu-lost', console)
+    report = reports[0].read_text() if reports else ''
+    assert status == 43 and out == 'EXIT\n' and note == reports[0].name + ' 0\n', (status, out, note, err[-400:])
+    assert 'reason: VK_ERROR_DEVICE_LOST\n' in report and '\nthread: GPUFencingThread (0x' in report, report[:400]
+    assert report.endswith('then: the app closes (the GPU hung; restart the console if its menu does not respond)\n')
 
     # Four threads at once: one report, one restart.
     status, out, err, reports, note = run(binary, 'many', console)
