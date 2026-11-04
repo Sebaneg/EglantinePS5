@@ -44,10 +44,10 @@ struct Defaults {
         sparse_tiles, skip_tessellation, jit_shared, gc_keep_dirty, graphics_usage_from_pool;
     int hcr_mode;
     unsigned cache_lock_spins, idle_spin_iterations, dispatch_mask;
-    Settings::AstcDecodeMode astc;
+    ::Settings::AstcDecodeMode astc;
     bool vertex_input_dynamic;
-    Settings::GpuClock gpu_clock;
-    Settings::ExtendedDynamicState dyna_state;
+    ::Settings::GpuClock gpu_clock;
+    ::Settings::ExtendedDynamicState dyna_state;
 };
 
 inline const Defaults& Initial() {
@@ -61,9 +61,9 @@ inline const Defaults& Initial() {
         Performance::gc_keep_dirty.load(), Performance::graphics_usage_from_pool.load(),
         DevVulkan::hcr_mode, Performance::cache_lock_spins.load(),
         Performance::idle_spin_iterations.load(), Performance::dispatch_mask.load(),
-        Settings::values.accelerate_astc.GetValue(),
-        Settings::values.vertex_input_dynamic_state.GetValue(),
-        Settings::values.gpu_clock.GetValue(), Settings::values.dyna_state.GetValue()};
+        ::Settings::values.accelerate_astc.GetValue(),
+        ::Settings::values.vertex_input_dynamic_state.GetValue(),
+        ::Settings::values.gpu_clock.GetValue(), ::Settings::values.dyna_state.GetValue()};
     return d;
 }
 
@@ -91,10 +91,10 @@ inline void Restore() {
     Performance::cache_lock_spins = d.cache_lock_spins;
     Performance::idle_spin_iterations = d.idle_spin_iterations;
     Performance::dispatch_mask = d.dispatch_mask;
-    Settings::values.accelerate_astc.SetValue(d.astc);
-    Settings::values.vertex_input_dynamic_state.SetValue(d.vertex_input_dynamic);
-    Settings::values.gpu_clock.SetValue(d.gpu_clock);
-    Settings::values.dyna_state.SetValue(d.dyna_state);
+    ::Settings::values.accelerate_astc.SetValue(d.astc);
+    ::Settings::values.vertex_input_dynamic_state.SetValue(d.vertex_input_dynamic);
+    ::Settings::values.gpu_clock.SetValue(d.gpu_clock);
+    ::Settings::values.dyna_state.SetValue(d.dyna_state);
 }
 
 // The lines of the lab file, without comments, blanks and trailing spaces.
@@ -143,17 +143,17 @@ inline bool ApplyEarly(const std::string& entry, bool& block_list_set) {
     else if (entry == "submit_sync=on") DevVulkan::sync_submissions = true;
     else if (entry == "gpu_time=on") DevVulkan::gpu_time = true;
     else if (entry == "pipeline_trace=on") DevVulkan::trace_pipelines = true;
-    else if (entry == "vertex_input_dynamic=off") Settings::values.vertex_input_dynamic_state.SetValue(false);
+    else if (entry == "vertex_input_dynamic=off") ::Settings::values.vertex_input_dynamic_state.SetValue(false);
     else if (entry.starts_with("dyna_state=") && entry.size() == 12 && entry[11] >= '0' && entry[11] <= '3')
-        Settings::values.dyna_state.SetValue(static_cast<Settings::ExtendedDynamicState>(entry[11] - '0'));
-    else if (entry == "astc=cpu") Settings::values.accelerate_astc.SetValue(Settings::AstcDecodeMode::Cpu);
-    else if (entry == "astc=gpu") Settings::values.accelerate_astc.SetValue(Settings::AstcDecodeMode::Gpu);
-    else if (entry == "vram=aggressive") Settings::values.vram_usage_mode.SetValue(Settings::VramUsageMode::Aggressive);
-    else if (entry == "vram=conservative") Settings::values.vram_usage_mode.SetValue(Settings::VramUsageMode::Conservative);
+        ::Settings::values.dyna_state.SetValue(static_cast<::Settings::ExtendedDynamicState>(entry[11] - '0'));
+    else if (entry == "astc=cpu") ::Settings::values.accelerate_astc.SetValue(::Settings::AstcDecodeMode::Cpu);
+    else if (entry == "astc=gpu") ::Settings::values.accelerate_astc.SetValue(::Settings::AstcDecodeMode::Gpu);
+    else if (entry == "vram=aggressive") ::Settings::values.vram_usage_mode.SetValue(::Settings::VramUsageMode::Aggressive);
+    else if (entry == "vram=conservative") ::Settings::values.vram_usage_mode.SetValue(::Settings::VramUsageMode::Conservative);
     else if (entry == "gpu_clock=normal" || entry == "gpu_clock=boost" || entry == "gpu_clock=overclock")
-        Settings::values.gpu_clock.SetValue(entry.ends_with("normal") ? Settings::GpuClock::Normal
-                                            : entry.ends_with("boost") ? Settings::GpuClock::Boost
-                                                                       : Settings::GpuClock::Overclock);
+        ::Settings::values.gpu_clock.SetValue(entry.ends_with("normal") ? ::Settings::GpuClock::Normal
+                                            : entry.ends_with("boost") ? ::Settings::GpuClock::Boost
+                                                                       : ::Settings::GpuClock::Overclock);
     else if (entry == "graphics_usage=driver") Performance::graphics_usage_from_pool = false;
     else if (entry == "gc_dirty=upstream") Performance::gc_keep_dirty = false;
     else if (entry.starts_with("dispatch_draws=") && Number(entry, 15, n) && n >= 8 && n <= 512 && (n & (n - 1)) == 0)
@@ -189,22 +189,22 @@ inline bool ApplyEarly(const std::string& entry, bool& block_list_set) {
 inline bool ApplyLate(const std::string& entry) {
     const auto on = entry.ends_with("=on");
     if (entry == "async_shaders=on" || entry == "async_shaders=off")
-        Settings::values.use_asynchronous_shaders.SetValue(on);
+        ::Settings::values.use_asynchronous_shaders.SetValue(on);
     else if (entry == "reactive_flushing=on" || entry == "reactive_flushing=off")
-        Settings::values.use_reactive_flushing.SetValue(on);
+        ::Settings::values.use_reactive_flushing.SetValue(on);
     else if (entry == "skip_invalidation=on" || entry == "skip_invalidation=off")
-        Settings::values.skip_cpu_inner_invalidation.SetValue(on);
+        ::Settings::values.skip_cpu_inner_invalidation.SetValue(on);
     else if (entry == "gpu_accuracy=low") {
         // Nothing calls UpdateGPUAccuracy() here; set the live value too.
-        Settings::values.gpu_accuracy.SetValue(Settings::GpuAccuracy::Low);
-        Settings::values.current_gpu_accuracy = Settings::GpuAccuracy::Low;
+        ::Settings::values.gpu_accuracy.SetValue(::Settings::GpuAccuracy::Low);
+        ::Settings::values.current_gpu_accuracy = ::Settings::GpuAccuracy::Low;
     } else if (entry == "gpu_accuracy=high") {
-        Settings::values.gpu_accuracy.SetValue(Settings::GpuAccuracy::High);
-        Settings::values.current_gpu_accuracy = Settings::GpuAccuracy::High;
-    } else if (entry == "cpu_accuracy=unsafe") Settings::values.cpu_accuracy = Settings::CpuAccuracy::Unsafe;
-    else if (entry == "cpu_accuracy=auto") Settings::values.cpu_accuracy = Settings::CpuAccuracy::Auto;
-    else if (entry == "dma_accuracy=unsafe") Settings::values.dma_accuracy.SetValue(Settings::DmaAccuracy::Unsafe);
-    else if (entry == "dma_accuracy=default") Settings::values.dma_accuracy.SetValue(Settings::DmaAccuracy::Default);
+        ::Settings::values.gpu_accuracy.SetValue(::Settings::GpuAccuracy::High);
+        ::Settings::values.current_gpu_accuracy = ::Settings::GpuAccuracy::High;
+    } else if (entry == "cpu_accuracy=unsafe") ::Settings::values.cpu_accuracy = ::Settings::CpuAccuracy::Unsafe;
+    else if (entry == "cpu_accuracy=auto") ::Settings::values.cpu_accuracy = ::Settings::CpuAccuracy::Auto;
+    else if (entry == "dma_accuracy=unsafe") ::Settings::values.dma_accuracy.SetValue(::Settings::DmaAccuracy::Unsafe);
+    else if (entry == "dma_accuracy=default") ::Settings::values.dma_accuracy.SetValue(::Settings::DmaAccuracy::Default);
     else return false;
     return true;
 }
