@@ -101,6 +101,7 @@ Estas se aplican **después** de los ajustes del juego (Ajustes > Rendimiento), 
 |---|---|
 | `memoria_compacta=on` | La memoria del juego se reparte en bloques de 2 MB. Con esto, un bloque con muchas partes vacías (ceros) guarda solo las partes usadas, de 16 KB. Libera memoria; cuando el juego vuelve a escribir en uno de esos bloques espera un momento (unos 0,3 ms). En `stderr.log`: `EDEN_CRAM on: ... fine=1`, y `fine_held=` dice cuánto guarda así. |
 | `bloques_repetidos=on` | Los bloques de 2 MB con el mismo contenido se guardan una sola vez. En un juego grande bajó de 30 a 20 FPS. En `stderr.log`: `EDEN_CRAM on: ... dedup=1`, y `dedup=` cuenta los bloques compartidos. |
+| `heap_bloque_propio=N` | La memoria interna del emulador: los bloques de N MB o más (de 2 a 32; sin esta línea, 32) tienen memoria aparte, que vuelve a la consola al liberarlos. Si no, dejan huecos que solo otro bloque del mismo tamaño puede usar. Puede ir algo más lento. En `stderr.log`, la línea `heap: holds ... MiB, ... MiB of it in use` dice cuánto retiene y cuánto usa. Para probar: `heap_bloque_propio=4`. |
 | `jit_list=on` / `off` | La lista de bloques de código ya traducidos (manda sobre Ajustes). |
 | `jit_shared=off` | Cada núcleo traduce su propio código. |
 | `fastmem=on` / `off` | Acceso directo a la memoria del juego (en la consola suele ir más lento). |
@@ -113,3 +114,4 @@ Estas se aplican **después** de los ajustes del juego (Ajustes > Rendimiento), 
 |---|---|
 | `log=render` | Registro detallado de los gráficos. |
 | `log_filter=...` | Cualquier filtro de Eden, con `+` en lugar de espacios: `log_filter=*:Info+Render.Vulkan:Debug`. |
+| `env=EDEN_NX2_TC_LOG=N` | Cada N fotogramas, en `eden_log.txt`: la memoria de gráficos en uso y las 12 texturas más grandes (`Texture cache: device memory ...`). Con `1` o sin número, cada 600. |

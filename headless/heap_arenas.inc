@@ -136,8 +136,22 @@ static size_t eden_heap_range_size;
 static atomic_uint eden_heap_space_hint; /* where the last allocation from the spaces succeeded */
 static atomic_flag eden_heap_grow_lock = ATOMIC_FLAG_INIT;
 
-/* Requests of this size or more get memory of their own (eden_heap_pages), freed with them. */
-#define EDEN_HEAP_LARGE_REQUEST ((size_t)32 << 20)
+/* Requests of this size or more get memory of their own (eden_heap_pages), freed with them. The
+ * lab file can lower it (eden_heap_set_large_request): blocks of a few MiB that come and go then
+ * give their memory back to the console when freed, instead of leaving holes in the heap's pieces
+ * that only a block of the same size can use again. */
+#define EDEN_HEAP_LARGE_REQUEST_DEFAULT ((size_t)32 << 20)
+static atomic_size_t eden_heap_large_request = EDEN_HEAP_LARGE_REQUEST_DEFAULT;
+#define EDEN_HEAP_LARGE_REQUEST atomic_load_explicit(&eden_heap_large_request, memory_order_relaxed)
+/* 0 restores the default; anything else is kept between 2 MiB (the pool's page) and the default. */
+void eden_heap_set_large_request(size_t bytes) {
+  const size_t lowest = (size_t)2 << 20;
+  if (bytes == 0 || bytes > EDEN_HEAP_LARGE_REQUEST_DEFAULT)
+    bytes = EDEN_HEAP_LARGE_REQUEST_DEFAULT;
+  else if (bytes < lowest)
+    bytes = lowest;
+  atomic_store_explicit(&eden_heap_large_request, bytes, memory_order_relaxed);
+}
 #define EDEN_HEAP_LARGE_BLOCKS 256u
 /* The large blocks alive: address 0 marks a free entry, 1 one being filled in. */
 static struct {

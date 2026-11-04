@@ -21,6 +21,8 @@
 #include "../src/fastmem.h"
 
 extern "C" bool eden_jit_shared;  // headless/dynarmic/jit_group_support.inc
+// The size from which a heap block gets memory of its own (headless/heap_arenas.inc); 0: default.
+extern "C" void eden_heap_set_large_request(std::size_t bytes) __attribute__((weak));
 
 // The guest's memory service (src/guest_memory_service.inc), read by its scanner as it runs.
 namespace Common {
@@ -111,6 +113,7 @@ inline void Restore() {
     DevVulkan::no_semaphore_latch = false;
     Common::SetGuestMemoryService(true, true, false);
     Common::SetGuestMemoryFine(false);
+    if (eden_heap_set_large_request) eden_heap_set_large_request(0);
     // Task/mesh draws hang the GPU under RADV (Mario Kart World on the console, and on desktop
     // AMD GPUs: Djihads80/Eglantine#404), so they are skipped unless the lab file says mesh=on.
     // Eglantine reads this once, at the first draw of the app's run.
@@ -215,6 +218,11 @@ inline bool ApplyEarly(const std::string& entry, bool& block_list_set) {
         Common::SetGuestMemoryFine(entry.ends_with("on"));
     else if (entry == "bloques_repetidos=on" || entry == "bloques_repetidos=off")
         Common::SetGuestMemoryService(true, true, entry.ends_with("on"));
+    // The emulator's heap: blocks of this many MiB or more (2 to 32) get memory of their own,
+    // which goes back to the console when they are freed instead of leaving a hole in the heap.
+    else if (entry.starts_with("heap_bloque_propio=") && Number(entry, 19, n) && n >= 2 && n <= 32 &&
+             eden_heap_set_large_request)
+        eden_heap_set_large_request(static_cast<std::size_t>(n) << 20);
     else if (entry == "fastmem=on" || entry == "fastmem=off") Fastmem::Request(entry.ends_with("on"));
     else if (entry == "jit_list=on" || entry == "jit_list=off") {
         JitList::enabled = entry.ends_with("on");

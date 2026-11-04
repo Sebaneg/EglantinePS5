@@ -1022,6 +1022,15 @@ adapt('src/video_core/texture_cache/texture_cache.h',
     ('namespace VideoCommon {', '#include "performance.h"\n#include "common/scope_exit.h"\nnamespace Vulkan { class TextureCacheRuntime; }\n\nnamespace VideoCommon {'),
     (download_prefix, download_prefix + (port / 'vulkan_download_batch.inc').read_text() + '\n'),
     (gc_original, gc),
+    # EDEN_NX2_TC_LOG=<n> reports every n frames (1 or no number: every 600, as upstream). A game
+    # that runs at a few frames a second while it loads ran out of memory before its first report.
+    ('    if (log_tc && ++frames % 600 == 0) {',
+     '    static const u64 log_every = [] {\n'
+     '        const char* const value = std::getenv("EDEN_NX2_TC_LOG");\n'
+     '        const unsigned long every = value != nullptr ? std::strtoul(value, nullptr, 10) : 0;\n'
+     '        return every > 1 ? u64{every} : u64{600};\n'
+     '    }();\n'
+     '    if (log_tc && ++frames % log_every == 0) {'),
     # RADV reports all Vulkan allocations, not just cached textures. A game's
     # measured ~1.9 GiB working set triggered dirty eviction at the old 1.6 GiB
     # threshold despite a 4 GiB budget. Retain 40% headroom; keep the original
