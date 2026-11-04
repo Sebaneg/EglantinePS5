@@ -4,10 +4,12 @@
 // A Switch 2 title asked for an 8192x8192 BC6H array of 68 layers (4.5G texels, over 5 GB). That is
 // too large to back, so Eden makes it as an unbacked sparse image, but the console's driver refuses
 // sparse images of that size: 34 layers were refused and 17 accepted. The image was then refused
-// outright and the session ended (VK_ERROR_OUT_OF_DEVICE_MEMORY). Such an image is now made with as
-// many layers as the driver accepts (tools/prepare-vulkan-port.py, CreateUnbackedImage), and the
-// views of it are kept inside those layers (vk_texture_cache.cpp, ImageView). Nothing is bound to an
-// unbacked image and nothing is uploaded to it, so the layers left out read the same as the others.
+// outright and the session ended (VK_ERROR_OUT_OF_DEVICE_MEMORY). Such an image is now made with one
+// layer, six for a cube (tools/prepare-vulkan-port.py, CreateUnbackedImage), and the views of it are
+// kept inside those layers (vk_texture_cache.cpp, ImageView). Nothing is bound to an unbacked image
+// and nothing is uploaded to it, so the layers left out read the same as the others. Made with the
+// 17 layers the driver took, it held 1.5 GB of GPU address space, and the driver could no longer
+// map the next 100 MB images.
 #pragma once
 #include <cstdint>
 #include <mutex>

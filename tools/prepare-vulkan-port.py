@@ -502,12 +502,15 @@ adapt('src/video_core/vulkan_common/vulkan_memory_allocator.cpp', 'vulkan_memory
                      unsigned(ci.usage), unsigned(ci.flags), int(ci.tiling), int(sparse_result), int(second));
         if (second != VK_SUCCESS) {
             // The driver refuses sparse images past a size (8192x8192 BC6H: 34 layers refused, 17
-            // accepted). Make it with as many layers as it accepts, halving from what was asked;
-            // its views are kept inside those layers (headless/capped_layers.h). Nothing is bound
-            // to it and nothing is uploaded, so the layers left out read like the others.
+            // accepted). Nothing is bound to this image and nothing is uploaded, so every layer reads
+            // the same: it is made with one layer (six for a cube), and its views are kept inside it
+            // (headless/capped_layers.h). Fewer layers matter: a sparse image takes GPU address space
+            // for all of them, and 17 such layers (1.5 GB) left the driver unable to map the next
+            // 100 MB images.
             const bool cube = (ci.flags & VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT) != 0;
+            const u32 layers = cube ? 6u : 1u;
             sparse = VkImage{};
-            for (u32 layers = ci.arrayLayers / 2; layers >= (cube ? 6u : 1u); layers /= 2) {
+            if (ci.arrayLayers > layers) {
                 VkImageCreateInfo smaller = sparse_ci;
                 smaller.arrayLayers = layers;
                 const VkResult made =
@@ -517,10 +520,9 @@ adapt('src/video_core/vulkan_common/vulkan_memory_allocator.cpp', 'vulkan_memory
                     ::Eden::CappedLayers::Remember(sparse, ci.arrayLayers, layers);
                     std::fprintf(stderr, "EDEN_SPARSE_CAPPED %ux%u, format %d: %u of %u layers\\n", ci.extent.width,
                                  ci.extent.height, int(ci.format), layers, ci.arrayLayers);
-                    break;
+                } else {
+                    sparse = VkImage{};
                 }
-                sparse = VkImage{};
-                if (layers == 1) break;
             }
             if (!sparse) {
                 return vk::Image{};
