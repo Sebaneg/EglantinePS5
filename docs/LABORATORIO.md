@@ -33,6 +33,7 @@ pipeline_trace=on
 
 | Opción | Qué hace |
 |---|---|
+| `mesh=on` / `off` | Los dibujos con *mesh shaders*. Vienen **apagados** (`off`): con el controlador RADV cuelgan la GPU en Mario Kart World (también en PC con tarjetas AMD). Con `off` faltan algunas partes de la imagen. Cuenta desde el primer juego que se abre después de iniciar la app. |
 | `teselacion=off` | No dibuja lo que usa teselación (terreno, agua...). Faltarán partes de la escena; sirve para saber si la teselación cuelga la GPU. |
 | `dispersas=on` | Activa las texturas "dispersas" gigantes de Eglantine (vienen apagadas: colgaron la consola). |
 | `sparse=off` | Apaga toda la memoria "dispersa" de la GPU (más drástico que lo anterior). |
@@ -98,6 +99,8 @@ Estas se aplican **después** de los ajustes del juego (Ajustes > Rendimiento), 
 
 | Opción | Qué hace |
 |---|---|
+| `memoria_compacta=on` | La memoria del juego se reparte en bloques de 2 MB. Con esto, un bloque con muchas partes vacías (ceros) guarda solo las partes usadas, de 16 KB. Libera memoria; cuando el juego vuelve a escribir en uno de esos bloques espera un momento (unos 0,3 ms). En `stderr.log`: `EDEN_CRAM on: ... fine=1`, y `fine_held=` dice cuánto guarda así. |
+| `bloques_repetidos=on` | Los bloques de 2 MB con el mismo contenido se guardan una sola vez. En un juego grande bajó de 30 a 20 FPS. En `stderr.log`: `EDEN_CRAM on: ... dedup=1`, y `dedup=` cuenta los bloques compartidos. |
 | `jit_list=on` / `off` | La lista de bloques de código ya traducidos (manda sobre Ajustes). |
 | `jit_shared=off` | Cada núcleo traduce su propio código. |
 | `fastmem=on` / `off` | Acceso directo a la memoria del juego (en la consola suele ir más lento). |

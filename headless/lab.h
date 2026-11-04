@@ -22,6 +22,12 @@
 
 extern "C" bool eden_jit_shared;  // headless/dynarmic/jit_group_support.inc
 
+// The guest's memory service (src/guest_memory_service.inc), read by its scanner as it runs.
+namespace Common {
+void SetGuestMemoryService(bool on, bool scan, bool dedup) noexcept;
+void SetGuestMemoryFine(bool on) noexcept;
+} // namespace Common
+
 namespace Eden::Lab {
 
 inline std::string Path() { return std::string{Eden::kDataDir} + "/laboratorio.txt"; }
@@ -103,6 +109,12 @@ inline void Restore() {
     ::Settings::values.async_presentation.SetValue(d.async_presentation);
     DevVulkan::present_frames = 0;
     DevVulkan::no_semaphore_latch = false;
+    Common::SetGuestMemoryService(true, true, false);
+    Common::SetGuestMemoryFine(false);
+    // Task/mesh draws hang the GPU under RADV (Mario Kart World on the console, and on desktop
+    // AMD GPUs: Djihads80/Eglantine#404), so they are skipped unless the lab file says mesh=on.
+    // Eglantine reads this once, at the first draw of the app's run.
+    SetVariable("EDEN_NX2_NO_MESH", "1");
 }
 
 // The lines of the lab file, without comments, blanks and trailing spaces.
@@ -170,6 +182,8 @@ inline bool ApplyEarly(const std::string& entry, bool& block_list_set) {
         ::Settings::values.gpu_clock.SetValue(entry.ends_with("normal") ? ::Settings::GpuClock::Normal
                                             : entry.ends_with("boost") ? ::Settings::GpuClock::Boost
                                                                        : ::Settings::GpuClock::Overclock);
+    else if (entry == "mesh=on") unsetenv("EDEN_NX2_NO_MESH");
+    else if (entry == "mesh=off") SetVariable("EDEN_NX2_NO_MESH", "1");
     else if (entry == "atajo=off") DevVulkan::no_semaphore_latch = true;
     else if (entry == "atajo=on") DevVulkan::no_semaphore_latch = false;
     // The thread a freeze report shows (crash_report.cpp FreezeWatch): GPU unless named here.
@@ -195,6 +209,12 @@ inline bool ApplyEarly(const std::string& entry, bool& block_list_set) {
         SetVariable(entry.substr(4, split - 4), entry.c_str() + split + 1);
     }
     // CPU and memory.
+    // The game's memory: memoria_compacta keeps only the written 16 KiB pages of a 2 MiB block that
+    // holds many pages of zeroes; bloques_repetidos shares 2 MiB blocks with the same contents.
+    else if (entry == "memoria_compacta=on" || entry == "memoria_compacta=off")
+        Common::SetGuestMemoryFine(entry.ends_with("on"));
+    else if (entry == "bloques_repetidos=on" || entry == "bloques_repetidos=off")
+        Common::SetGuestMemoryService(true, true, entry.ends_with("on"));
     else if (entry == "fastmem=on" || entry == "fastmem=off") Fastmem::Request(entry.ends_with("on"));
     else if (entry == "jit_list=on" || entry == "jit_list=off") {
         JitList::enabled = entry.ends_with("on");
