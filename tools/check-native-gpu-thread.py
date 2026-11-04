@@ -11,7 +11,30 @@ upstream = cache / 'source/src'
 generated = cache / 'native-local/headless/gpu_thread.cpp'
 source = (upstream / 'video_core/gpu_thread.cpp').read_text()
 worker = generated.read_text()
-body = source.split('thread = std::jthread([&](std::stop_token stop_token) {', 1)[1].split('\n    });', 1)[0]
+# The overflow of a full queue (headless/CMakeLists.txt, PushCommand): the worker takes it after the
+# queue. Taken out here, the rest must still be Eden's worker.
+overflow_pop = """
+        // The overflow of a full queue comes after it, in order (PushCommand).
+        const auto pop_queued = [this](CommandDataContainer& out) {
+            if (state.queue.TryPop(out)) {
+                return true;
+            }
+            std::scoped_lock overflow_lock{state.write_lock};
+            if (state.overflow.empty()) {
+                return false;
+            }
+            out = std::move(state.overflow.front());
+            state.overflow.pop_front();
+            return true;
+        };"""
+assert worker.count('        CommandDataContainer next;' + overflow_pop) == 1
+worker = worker.replace(overflow_pop, '', 1)
+overflow_wait = 'if (!pop_queued(next)) state.queue.PopWait(next, stop_token);'
+assert worker.count(overflow_wait) == 1
+worker = worker.replace(overflow_wait, 'state.queue.PopWait(next, stop_token);')
+assert 'pop_queued(next)' in worker
+worker = worker.replace('pop_queued(next)', 'state.queue.TryPop(next)')
+body =source.split('thread = std::jthread([&](std::stop_token stop_token) {', 1)[1].split('\n    });', 1)[0]
 dispatch_call = re.search(r'\n( {16}Profile::Scope scope\{Profile::Zone::Push\};\n.*?scheduler\.Push\(system\.GPU\(\), submit_list->channel, std::move\(submit_list->entries\)\);)', source, re.S).group(1)
 idle_call = ('                Profile::Scope scope{Profile::Zone::Idle};\n'
              '                state.queue.PopWait(next, stop_token);')

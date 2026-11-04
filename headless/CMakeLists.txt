@@ -2061,6 +2061,16 @@ if(EDEN_PS5_OPENGL)
     string(REPLACE "using CommandQueue = Common::SPSCQueue<CommandDataContainer>;"
         "using CommandQueue = Common::SPSCQueue<CommandDataContainer, 8>;"
         gpu_thread_header "${gpu_thread_header}")
+    # Work the GPU thread runs for the services (RunCommand) that found the 8-entry queue full waits
+    # here instead of in PushCommand (see the PushCommand below).
+    string(REPLACE "    bool shutting_down{};\n};"
+        "    bool shutting_down{};\n    std::deque<CommandDataContainer> overflow; // Protected by write_lock.\n};"
+        gpu_thread_header "${gpu_thread_header}")
+    string(FIND "${gpu_thread_header}" "std::deque<CommandDataContainer> overflow;" gpu_overflow_at)
+    if(gpu_overflow_at LESS 0)
+        message(FATAL_ERROR "Pinned GPU thread state changed")
+    endif()
+    string(REPLACE "#include <atomic>\n" "#include <atomic>\n#include <deque>\n" gpu_thread_header "${gpu_thread_header}")
     string(REPLACE "    ~ThreadManager();" "    ~ThreadManager();\n    void Stop() { thread.request_stop(); if (thread.joinable()) thread.join(); }" gpu_thread_header "${gpu_thread_header}")
     if(PS5_NATIVE)
         string(PREPEND gpu_thread_header "#include <pthread.h>\n")
@@ -2162,6 +2172,105 @@ if(EDEN_PS5_OPENGL)
                 "    if (stop_source.stop_requested() ||\n        !state.queue.TryEmplace(std::move(command_data), fence, block${queue_publish})) {\n        ::Eden::Performance::Timer full_timer(::Eden::Performance::gpu_queue_full);\n${full_wait}\n    }"
                 gpu_worker "${gpu_worker}")
         endif()
+        # A Switch 2 title froze in its intro: the GPU thread waited for the nx2 memory registry's
+        # lock (Fermi2D blit -> BackSparseWrite -> Nx2GpuMemoryRegistry::BackSparse), held by a
+        # service thread inside a registry listener (Nx2Map, Nx2Sparse...) that was pushing a
+        # RunInOrder onto the full 8-entry queue, which only the GPU thread empties. The services
+        # call RunInOrder under the registry's, the address space's and the sparse regions' locks,
+        # all of which the GPU thread takes. So a RunCommand never waits: past a full queue it goes
+        # to an overflow list the GPU thread takes after the queue, in fence order. Other commands
+        # still wait for room, without holding write_lock, and only once the overflow is empty.
+        set(push_start "u64 ThreadManager::PushCommand(CommandData&& command_data, bool block, bool is_async) {\n")
+        string(FIND "${gpu_worker}" "${push_start}" push_offset)
+        if(push_offset LESS 0)
+            message(FATAL_ERROR "Pinned GPU queue push changed")
+        endif()
+        string(SUBSTRING "${gpu_worker}" ${push_offset} -1 push_tail)
+        set(push_end "\n    return fence;\n}\n")
+        string(FIND "${push_tail}" "${push_end}" push_length)
+        if(push_length LESS 0)
+            message(FATAL_ERROR "Pinned GPU queue push end changed")
+        endif()
+        string(LENGTH "${push_end}" push_end_length)
+        math(EXPR push_length "${push_length} + ${push_end_length}")
+        string(SUBSTRING "${push_tail}" 0 ${push_length} push_old)
+        set(push_new [=[u64 ThreadManager::PushCommand(CommandData&& command_data, bool block, bool is_async) {
+    if (!is_async) {
+        // In synchronous GPU mode, block the caller until the command has executed
+        block = true;
+    }
+
+    if (const auto* read = std::get_if<CpuReadCommand>(&command_data);
+        read && read->diagnostic) {
+        read->diagnostic->before_lock = ReadbackDependencyDiagnostics::Now();
+    }
+    // A RunCommand never waits for room (see the port's CMakeLists.txt): its callers hold locks the
+    // GPU thread takes. Nor does the GPU thread itself, the only one that makes room. The fence is
+    // taken when the command is queued, so fences stay in order.
+    const bool never_waits = std::holds_alternative<RunCommand>(command_data) || IsCurrentThread();
+    u64 fence{};
+    for (bool published = false;;) {
+        std::unique_lock lk(state.write_lock);
+        if (state.shutting_down || stop_source.stop_requested()) {
+            return state.signaled_fence.load(std::memory_order_relaxed);
+        }
+        if (!published && !std::holds_alternative<CpuReadCommand>(command_data)) {
+            state.published_work_sequence.fetch_add(1, std::memory_order_acq_rel);
+            InvalidateReadbackCache();
+            published = true;
+        }
+        const u64 next_fence = state.last_fence + 1;
+        const u64 sequence = state.published_work_sequence.load(std::memory_order_acquire);
+        if (state.overflow.empty() &&
+            state.queue.TryEmplace(std::move(command_data), next_fence, block, sequence)) {
+            fence = state.last_fence = next_fence;
+            break;
+        }
+        if (never_waits) {
+            state.overflow.emplace_back(std::move(command_data), next_fence, block, sequence);
+            fence = state.last_fence = next_fence;
+            break;
+        }
+        lk.unlock();
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+    }
+    if (block) {
+        u64 signaled = state.signaled_fence.load(std::memory_order_acquire);
+        while (signaled < fence && !stop_source.stop_requested()) {
+            std::this_thread::sleep_for(std::chrono::microseconds(100));
+            signaled = state.signaled_fence.load(std::memory_order_acquire);
+        }
+    }
+
+    return fence;
+}
+]=])
+        string(REPLACE "${push_old}" "${push_new}" gpu_worker "${gpu_worker}")
+        # The GPU thread takes the overflow after the queue.
+        set(pop_queued [=[
+        // The overflow of a full queue comes after it, in order (PushCommand).
+        const auto pop_queued = [this](CommandDataContainer& out) {
+            if (state.queue.TryPop(out)) {
+                return true;
+            }
+            std::scoped_lock overflow_lock{state.write_lock};
+            if (state.overflow.empty()) {
+                return false;
+            }
+            out = std::move(state.overflow.front());
+            state.overflow.pop_front();
+            return true;
+        };]=])
+        string(REPLACE "state.queue.TryPop(next)" "pop_queued(next)" gpu_worker "${gpu_worker}")
+        string(REPLACE "state.queue.PopWait(next, stop_token);"
+            "if (!pop_queued(next)) state.queue.PopWait(next, stop_token);" gpu_worker "${gpu_worker}")
+        string(REPLACE "        CommandDataContainer next;" "        CommandDataContainer next;\n${pop_queued}" gpu_worker "${gpu_worker}")
+        foreach(gpu_overflow_part "std::deque" "state.overflow.emplace_back" "if (!pop_queued(next))" "const auto pop_queued")
+            string(FIND "${gpu_worker}${gpu_thread_header}" "${gpu_overflow_part}" gpu_overflow_part_at)
+            if(gpu_overflow_part_at LESS 0)
+                message(FATAL_ERROR "GPU queue overflow not in place: ${gpu_overflow_part}")
+            endif()
+        endforeach()
         write_derived("${PORT_BUILD_DIR}/gpu_thread.cpp" "${gpu_worker}")
         list(REMOVE_ITEM video_sources gpu_thread.cpp)
         list(APPEND video_sources "${PORT_BUILD_DIR}/gpu_thread.cpp")
