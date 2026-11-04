@@ -562,12 +562,17 @@ void FreezeWatch() {
             continue;
         }
         if (!armed || ++still < limit) continue;
+        // The thread to report: GPU unless EDEN_FREEZE_THREAD (lab file congelamiento_hilo=) names
+        // another, e.g. VulkanWorker, GPUFencingThread or VulkanPresent.
+        const char* target = std::getenv("EDEN_FREEZE_THREAD");
+        if (!target || !*target) target = "GPU";
         std::uintptr_t gpu = 0;
         for (const NamedThread& entry : named_threads)
-            if (!std::strcmp(entry.name, "GPU")) gpu = entry.thread.load(std::memory_order_acquire);
-        static char reason[96];
-        std::snprintf(reason, sizeof(reason), "frozen: no game frame for %u s; this is where the GPU thread was", limit);
-        std::fprintf(stderr, "EDEN_FREEZE no game frame for %u s, frames %llu; GPU thread 0x%lx\n", limit, now,
+            if (!std::strcmp(entry.name, target)) gpu = entry.thread.load(std::memory_order_acquire);
+        static char reason[128];
+        std::snprintf(reason, sizeof(reason), "frozen: no game frame for %u s; this is where the %.32s thread was", limit,
+                      target);
+        std::fprintf(stderr, "EDEN_FREEZE no game frame for %u s, frames %llu; %s thread 0x%lx\n", limit, now, target,
                      static_cast<unsigned long>(gpu));
         std::fflush(stderr);
         freeze_reason.store(reason, std::memory_order_release);
@@ -575,7 +580,7 @@ void FreezeWatch() {
             for (int i = 0; i < 100 && state.load(std::memory_order_acquire) == kIdle; ++i) Sleep(100000);
             if (state.load(std::memory_order_acquire) != kIdle) return;
         }
-        std::snprintf(reason, sizeof(reason), "frozen: no game frame for %u s; the GPU thread %s", limit,
+        std::snprintf(reason, sizeof(reason), "frozen: no game frame for %u s; the %.32s thread %s", limit, target,
                       gpu ? "did not take the signal" : "was not found");
         Fail(reason);
     }

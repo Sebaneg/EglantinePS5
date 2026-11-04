@@ -169,6 +169,9 @@ inline bool ApplyEarly(const std::string& entry, bool& block_list_set) {
         ::Settings::values.gpu_clock.SetValue(entry.ends_with("normal") ? ::Settings::GpuClock::Normal
                                             : entry.ends_with("boost") ? ::Settings::GpuClock::Boost
                                                                        : ::Settings::GpuClock::Overclock);
+    // The thread a freeze report shows (crash_report.cpp FreezeWatch): GPU unless named here.
+    else if (entry.starts_with("congelamiento_hilo=") && entry.size() > 19)
+        SetVariable("EDEN_FREEZE_THREAD", entry.c_str() + 19);
     // Presentation: how finished frames reach the TV, read when the game's renderer starts.
     else if (entry == "vsync=fifo") ::Settings::values.vsync_mode.SetValue(::Settings::VSyncMode::Fifo);
     else if (entry == "vsync=mailbox") ::Settings::values.vsync_mode.SetValue(::Settings::VSyncMode::Mailbox);
