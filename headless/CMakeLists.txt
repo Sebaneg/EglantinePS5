@@ -133,22 +133,6 @@ string(REPLACE "    to.impl->previous_fiber = weak_from.lock();"
     "    to.impl->previous_fiber = weak_from.lock();\n    ASSERT(to.impl->previous_fiber);\n    weak_from.reset();" fiber_source "${fiber_source}")
 string(REPLACE "    // \"from\" might no longer be valid if the thread was killed\n    if (auto from = weak_from.lock()) {"
     "    if (auto* from = static_cast<Fiber*>(transfer.data)) {" fiber_source "${fiber_source}")
-# Every fiber held a second 2 MiB stack for rewinding, zeroed (so backed on the console), which
-# nothing uses: nothing sets a rewind point and no code runs on that stack. A Switch 2 title with 166
-# guest and service threads held 332 MiB in them, and ran out of memory for a 121 MiB upload buffer
-# with 35 MiB left.
-set(fiber_rewind "    std::array<u8, DEFAULT_STACK_SIZE> rewind_stack{};")
-string(FIND "${fiber_source}" "${fiber_rewind}" fiber_rewind_at)
-if(fiber_rewind_at LESS 0)
-    message(FATAL_ERROR "Pinned fiber rewind stack changed")
-endif()
-string(REGEX MATCHALL "rewind_stack[^_]" fiber_rewind_uses "${fiber_source}")
-list(LENGTH fiber_rewind_uses fiber_rewind_count)
-if(NOT fiber_rewind_count EQUAL 2)
-    message(FATAL_ERROR "Fiber rewind stack used in a new place (${fiber_rewind_count}); review before shrinking it")
-endif()
-string(REPLACE "${fiber_rewind}" "    std::array<u8, 16> rewind_stack{}; // unused: see headless/CMakeLists.txt"
-    fiber_source "${fiber_source}")
 write_derived("${PORT_BUILD_DIR}/fiber.cpp" "${fiber_source}")
 get_target_property(common_sources common SOURCES)
 list(REMOVE_ITEM common_sources fiber.cpp)
@@ -1182,18 +1166,6 @@ list(REMOVE_ITEM core_sources core.cpp)
 list(APPEND core_sources "${PORT_BUILD_DIR}/core.cpp")
 set_property(TARGET core PROPERTY SOURCES "${core_sources}")
 
-# The builder's vectors own every context through serialization. Parent links
-# only navigate that live tree; owning them creates parent/child cycles.
-file(READ "${PROJECT_SOURCE_DIR}/src/core/file_sys/fsmitm_romfsbuild.cpp" romfs_source)
-string(REPLACE "    std::shared_ptr<RomFSBuildDirectoryContext> parent;"
-    "    RomFSBuildDirectoryContext* parent = nullptr;" romfs_source "${romfs_source}")
-string(REPLACE "parent = std::move(parent_dir_ctx);" "parent = parent_dir_ctx.get();" romfs_source "${romfs_source}")
-write_derived("${PORT_BUILD_DIR}/fsmitm_romfsbuild.cpp" "${romfs_source}")
-get_target_property(core_sources core SOURCES)
-list(REMOVE_ITEM core_sources file_sys/fsmitm_romfsbuild.cpp)
-list(APPEND core_sources "${PORT_BUILD_DIR}/fsmitm_romfsbuild.cpp")
-set_property(TARGET core PROPERTY SOURCES "${core_sources}")
-
 # One change to a pinned Eden source; the build stops when the text it replaces is gone.
 function(eden_patch source old new)
     string(FIND "${${source}}" "${old}" patch_at)
@@ -1947,8 +1919,15 @@ write_derived("${PORT_BUILD_DIR}/sink_details.cpp" "#include \"devices.h\"\n${si
 file(READ "${PROJECT_SOURCE_DIR}/src/audio_core/sink/sink_stream.cpp" stream_source)
 string(REPLACE "    if (type == StreamType::In)\n        return;"
     "    if (type == StreamType::In)\n        return;\n    static_assert(std::is_same_v<decltype(samples_buffer), Common::RingBuffer<s16, 0x10000>>);\n    if (buffer.frames * device_channels > 0x10000 - samples_buffer.Size())\n        throw std::overflow_error(\"Audio PCM queue capacity exceeded\");" stream_source "${stream_source}")
-string(REPLACE "        samples_buffer.Push(new_samples);"
-    "        if (system_channels == 1 && device_channels == 2) {\n            for (std::size_t i = 0; i < new_samples.size(); i += 2) new_samples[i + 1] = new_samples[i];\n        }\n        samples_buffer.Push(new_samples);" stream_source "${stream_source}")
+# Eden counts what the queue took (pushed); the pinned source before it pushed without counting.
+string(FIND "${stream_source}" "        pushed = samples_buffer.Push(new_samples);" stream_counts_pushed)
+if(stream_counts_pushed LESS 0)
+    set(stream_push "        samples_buffer.Push(new_samples);")
+else()
+    set(stream_push "        pushed = samples_buffer.Push(new_samples);")
+endif()
+eden_patch(stream_source "${stream_push}"
+    "        if (system_channels == 1 && device_channels == 2) {\n            for (std::size_t i = 0; i < new_samples.size(); i += 2) new_samples[i + 1] = new_samples[i];\n        }\n${stream_push}")
 # Refresh the held frame before a partial hardware block underruns.
 string(REPLACE "    std::memcpy(last_frame.data(), &output_buffer[(frames_written - 1) * frame_size], frame_size_bytes);" "" stream_source "${stream_source}")
 string(REPLACE "        samples_buffer.Pop(&output_buffer[frames_written * frame_size], frames_available * frame_size);"
@@ -2079,9 +2058,16 @@ if(EDEN_PS5_OPENGL)
         gpu_thread_header "${gpu_thread_header}")
     # Work the GPU thread runs for the services (RunCommand) that found the 8-entry queue full waits
     # here instead of in PushCommand (see the PushCommand below).
-    string(REPLACE "    bool shutting_down{};\n};"
-        "    bool shutting_down{};\n    std::deque<CommandDataContainer> overflow; // Protected by write_lock.\n};"
-        gpu_thread_header "${gpu_thread_header}")
+    # The state's last member: shutting_down in the readback-tracking source, cv in Eden's own.
+    foreach(gpu_state_end "    bool shutting_down{};\n};" "    std::condition_variable_any cv;\n};")
+        string(FIND "${gpu_thread_header}" "${gpu_state_end}" gpu_state_end_at)
+        if(NOT gpu_state_end_at LESS 0)
+            string(REGEX REPLACE "\n};$" "\n    std::deque<CommandDataContainer> overflow; // Protected by write_lock.\n};"
+                gpu_state_with_overflow "${gpu_state_end}")
+            string(REPLACE "${gpu_state_end}" "${gpu_state_with_overflow}" gpu_thread_header "${gpu_thread_header}")
+            break()
+        endif()
+    endforeach()
     string(FIND "${gpu_thread_header}" "std::deque<CommandDataContainer> overflow;" gpu_overflow_at)
     if(gpu_overflow_at LESS 0)
         message(FATAL_ERROR "Pinned GPU thread state changed")
@@ -2095,6 +2081,13 @@ if(EDEN_PS5_OPENGL)
         string(REPLACE "    std::jthread thread;"
             "    void RunWorker(VideoCore::RendererBase&, Core::Frontend::GraphicsContext&, Tegra::Control::Scheduler&);\n    pthread_t thread{};\n    std::stop_source stop_source;\n    bool thread_joinable{};" gpu_thread_header "${gpu_thread_header}")
         string(REPLACE "return thread.get_id() == std::this_thread::get_id();" "return thread && pthread_equal(thread, pthread_self()) != 0;" gpu_thread_header "${gpu_thread_header}")
+        # PushCommand (below) asks whether the GPU thread itself pushes; Eden's own source has no
+        # such check.
+        string(FIND "${gpu_thread_header}" "bool IsCurrentThread() const" gpu_has_current_thread)
+        if(gpu_has_current_thread LESS 0)
+            eden_patch(gpu_thread_header "    void Stop();"
+                "    void Stop();\n    bool IsCurrentThread() const { return thread && pthread_equal(thread, pthread_self()) != 0; }")
+        endif()
         file(READ "${PROJECT_SOURCE_DIR}/src/video_core/gpu_thread.cpp" gpu_worker)
         set(worker_start "void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Frontend::GraphicsContext& context, Tegra::Control::Scheduler& scheduler) {\n    rasterizer = renderer.ReadRasterizer();\n    thread = std::jthread([&](std::stop_token stop_token) {")
         string(FIND "${gpu_worker}" "${worker_start}" worker_start_offset)
@@ -2261,6 +2254,51 @@ if(EDEN_PS5_OPENGL)
     return fence;
 }
 ]=])
+        # Eden's own source (no readback tracking): a waiter for its fence sleeps on state.cv, which
+        # the GPU thread signals under write_lock, so no push may wait for room holding that lock.
+        set(push_new_plain [=[u64 ThreadManager::PushCommand(CommandData&& command_data, bool block, bool is_async) {
+    if (!is_async) {
+        // In synchronous GPU mode, block the caller until the command has executed
+        block = true;
+    }
+    // A RunCommand never waits for room (see the port's CMakeLists.txt): its callers hold locks the
+    // GPU thread takes. Nor does the GPU thread itself, the only one that makes room. Others wait
+    // without write_lock, which the GPU thread takes to say a command ran. The fence is taken when
+    // the command is queued, so fences stay in order.
+    const bool never_waits = std::holds_alternative<RunCommand>(command_data) || IsCurrentThread();
+    std::unique_lock lk(state.write_lock);
+    u64 fence{};
+    for (;;) {
+        if (stop_source.stop_requested()) {
+            return state.signaled_fence.load(std::memory_order_relaxed);
+        }
+        const u64 next_fence = state.last_fence + 1;
+        if (state.overflow.empty() && state.queue.TryEmplace(std::move(command_data), next_fence, block)) {
+            fence = state.last_fence = next_fence;
+            break;
+        }
+        if (never_waits) {
+            state.overflow.emplace_back(std::move(command_data), next_fence, block);
+            fence = state.last_fence = next_fence;
+            break;
+        }
+        lk.unlock();
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+        lk.lock();
+    }
+    if (block) {
+        state.cv.wait(lk, stop_source.get_token(), [this, fence] {
+            return fence <= state.signaled_fence.load(std::memory_order_relaxed);
+        });
+    }
+
+    return fence;
+}
+]=])
+        string(FIND "${gpu_worker}" "published_work_sequence" gpu_tracks_readback)
+        if(gpu_tracks_readback LESS 0)
+            set(push_new "${push_new_plain}")
+        endif()
         string(REPLACE "${push_old}" "${push_new}" gpu_worker "${gpu_worker}")
         # The GPU thread takes the overflow after the queue.
         set(pop_queued [=[
@@ -2295,6 +2333,11 @@ if(EDEN_PS5_OPENGL)
     write_derived("${PORT_BUILD_DIR}/include/video_core/gpu_thread.h" "${gpu_thread_header}")
     target_include_directories(video_core BEFORE PRIVATE "${PORT_BUILD_DIR}/include")
     string(REPLACE "    ~Impl() = default;" "    ~Impl() { gpu_thread.Stop(); if (renderer && Settings::IsOpenGL()) { renderer->Context().MakeCurrent(); glFinish(); } }" gpu_source "${gpu_source}")
+    # Newer Eden has its own destructor (NotifyShutdown, which stops the worker here, then the
+    # renderer): the OpenGL context still finishes its work before the renderer goes.
+    string(REPLACE "    ~Impl() {\n        NotifyShutdown();\n"
+        "    ~Impl() {\n        NotifyShutdown();\n        if (renderer && Settings::IsOpenGL()) { renderer->Context().MakeCurrent(); glFinish(); }\n"
+        gpu_source "${gpu_source}")
     # Join before unique_ptr destruction clears GPU::impl: queued draws call back
     # through GPU::TickWork. NotifyShutdown also protects service-owned state.
     # Eden joins its worker first; here the waiters are woken first, so that a guest thread waiting
@@ -2344,6 +2387,13 @@ if(EDEN_DEV_PROFILE)
     file(READ "${PROJECT_SOURCE_DIR}/src/video_core/engines/maxwell_3d.cpp" maxwell_source)
     set(condition_accelerated "    if (rasterizer->AccelerateConditionalRendering()) {\n        execute_on = true;\n        return;\n    }")
     set(condition_end "    }\n    }\n}\n\nvoid Maxwell3D::ProcessCounterReset() {")
+    # Newer Eden ends the function with a trace block after the switch: the count goes after it.
+    set(condition_head "    }\n    }\n")
+    string(FIND "${maxwell_source}" "${condition_end}" condition_end_at)
+    if(condition_end_at LESS 0)
+        set(condition_end "    }\n}\n\nvoid Maxwell3D::ProcessCounterReset() {")
+        set(condition_head "    }\n")
+    endif()
     foreach(anchor IN ITEMS condition_accelerated condition_end)
         string(FIND "${maxwell_source}" "${${anchor}}" anchor_at)
         if(anchor_at LESS 0)
@@ -2354,7 +2404,7 @@ if(EDEN_DEV_PROFILE)
         "    if (rasterizer->AccelerateConditionalRendering()) {\n        execute_on = true;\n        ::Eden::Performance::CountCondition(0);\n        return;\n    }"
         maxwell_source "${maxwell_source}")
     string(REPLACE "${condition_end}"
-        "    }\n    }\n    ::Eden::Performance::CountCondition(\n        regs.render_enable_override == Regs::RenderEnable::Override::AlwaysRender ? 1u :\n        regs.render_enable_override == Regs::RenderEnable::Override::NeverRender ? 2u :\n        3u + static_cast<unsigned>(regs.render_enable.mode) * 2u + (execute_on ? 1u : 0u));\n}\n\nvoid Maxwell3D::ProcessCounterReset() {"
+        "${condition_head}    ::Eden::Performance::CountCondition(\n        regs.render_enable_override == Regs::RenderEnable::Override::AlwaysRender ? 1u :\n        regs.render_enable_override == Regs::RenderEnable::Override::NeverRender ? 2u :\n        3u + static_cast<unsigned>(regs.render_enable.mode) * 2u + (execute_on ? 1u : 0u));\n}\n\nvoid Maxwell3D::ProcessCounterReset() {"
         maxwell_source "${maxwell_source}")
     write_derived("${PORT_BUILD_DIR}/maxwell_3d.cpp" "#include \"${EDEN_PORT_DIR}/performance.h\"\n${maxwell_source}")
     list(REMOVE_ITEM video_sources engines/maxwell_3d.cpp)
@@ -2412,6 +2462,13 @@ ${paths_source}")
     # Eglantine measures the TSC of CPUs without leaf 0x15 itself, for frequency 0 only; the block
     # below covers every frequency under 1 GHz, so that one goes (tools/check-tsc-fallback.py).
     string(REPLACE "    // AMD CPUs have no leaf 0x15 (Zen 4 stops at 0x10): measure their invariant TSC too, or every\n    // guest clock read (CNTPCT, which games read thousands of times a frame) goes through the\n    // host's much slower QueryPerformanceCounter.\n    if (caps.invariant_tsc && caps.tsc_frequency == 0) {\n        caps.tsc_frequency = X64::EstimateRDTSCFrequency();\n    }\n\n" "" features_source "${features_source}")
+    # Newer Eglantine keeps that block for CPUs without leaf 0x15 only (an Intel CPU with the leaf
+    # and no crystal frequency crashed on the measured clock). The PS5 has no leaf 0x15 either.
+    string(REPLACE "    // AMD CPUs have no leaf 0x15 (Zen 4 stops at 0x10): measure their invariant TSC too, or every\n    // guest clock read (CNTPCT, which games read thousands of times a frame) goes through the\n    // host's much slower QueryPerformanceCounter. Intel CPUs that have the leaf but report no\n    // crystal frequency (e.g. Coffee Lake) keep the OS clock: an i5-9400F crashed at launch on the\n    // measured RDTSC clock.\n    if (max_std_fn < 0x15 && caps.invariant_tsc && caps.tsc_frequency == 0) {\n        caps.tsc_frequency = X64::EstimateRDTSCFrequency();\n    }\n\n" "" features_source "${features_source}")
+    string(FIND "${features_source}" "measure their invariant TSC too" tsc_block_left)
+    if(NOT tsc_block_left LESS 0)
+        message(FATAL_ERROR "Eglantine's TSC fallback changed; review it against the PS5's (tools/check-tsc-fallback.py)")
+    endif()
     string(REPLACE "    if (max_std_fn >= 0x16) {"
         "    if (caps.invariant_tsc && caps.tsc_frequency < 1'000'000'000ULL) {\n        caps.tsc_frequency = X64::EstimateRDTSCFrequency();\n    }\n\n    if (max_std_fn >= 0x16) {" features_source "${features_source}")
     write_derived("${PORT_BUILD_DIR}/cpu_features.cpp" "${features_source}")
