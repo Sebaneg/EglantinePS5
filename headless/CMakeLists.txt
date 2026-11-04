@@ -133,6 +133,22 @@ string(REPLACE "    to.impl->previous_fiber = weak_from.lock();"
     "    to.impl->previous_fiber = weak_from.lock();\n    ASSERT(to.impl->previous_fiber);\n    weak_from.reset();" fiber_source "${fiber_source}")
 string(REPLACE "    // \"from\" might no longer be valid if the thread was killed\n    if (auto from = weak_from.lock()) {"
     "    if (auto* from = static_cast<Fiber*>(transfer.data)) {" fiber_source "${fiber_source}")
+# Every fiber held a second 2 MiB stack for rewinding, zeroed (so backed on the console), which
+# nothing uses: nothing sets a rewind point and no code runs on that stack. A Switch 2 title with 166
+# guest and service threads held 332 MiB in them, and ran out of memory for a 121 MiB upload buffer
+# with 35 MiB left.
+set(fiber_rewind "    std::array<u8, DEFAULT_STACK_SIZE> rewind_stack{};")
+string(FIND "${fiber_source}" "${fiber_rewind}" fiber_rewind_at)
+if(fiber_rewind_at LESS 0)
+    message(FATAL_ERROR "Pinned fiber rewind stack changed")
+endif()
+string(REGEX MATCHALL "rewind_stack[^_]" fiber_rewind_uses "${fiber_source}")
+list(LENGTH fiber_rewind_uses fiber_rewind_count)
+if(NOT fiber_rewind_count EQUAL 2)
+    message(FATAL_ERROR "Fiber rewind stack used in a new place (${fiber_rewind_count}); review before shrinking it")
+endif()
+string(REPLACE "${fiber_rewind}" "    std::array<u8, 16> rewind_stack{}; // unused: see headless/CMakeLists.txt"
+    fiber_source "${fiber_source}")
 write_derived("${PORT_BUILD_DIR}/fiber.cpp" "${fiber_source}")
 get_target_property(common_sources common SOURCES)
 list(REMOVE_ITEM common_sources fiber.cpp)
