@@ -13,9 +13,13 @@ jobs:
       - name: Dependencias
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build pkg-config python3 clang-18 llvm-18 lld-18 libssl-dev zlib1g-dev
+          sudo apt-get install -y cmake ninja-build pkg-config python3 clang-18 llvm-18 lld-18 \
+            libssl-dev zlib1g-dev nasm yasm autoconf automake libtool curl unzip xz-utils zstd
       - name: Compilar
-        run: make 2>&1 | tee make.log
+        shell: bash
+        run: |
+          set -o pipefail
+          make 2>&1 | tee make.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
