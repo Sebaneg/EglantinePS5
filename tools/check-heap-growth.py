@@ -240,6 +240,7 @@ size_t eden_heap_large_held(unsigned *blocks);
 void eden_heap_spill_stats(unsigned long long *, unsigned long long *, unsigned long long *, unsigned long long *);
 size_t eden_heap_trim(void);
 void eden_heap_usage(size_t *held, size_t *in_use, size_t *returned);
+void eden_heap_set_large_request(size_t bytes);
 
 static void fill(unsigned char *block, size_t size, unsigned seed) {
     // The start and the end of a large block are enough to see another owner writing into it.
@@ -491,6 +492,47 @@ int main(int argc, char **argv) {
         __wrap_free(pieces);
         assert(atomic_load(&split_blocks) == 0 && eden_heap_large_held(&blocks_alive) == 0);
         assert(eden_heap_committed() == before_split);  // the heap's pieces did not grow for it
+        // The lab file's heap_bloque_propio=4: blocks of 4 MiB or more get memory of their own and
+        // give it back when freed, the smaller ones stay in the heap, and 0 brings back 32 MiB.
+        eden_heap_set_large_request((size_t)4 << 20);
+        const size_t before_lowered = eden_heap_committed();
+        enum { MIDDLE = 64 };
+        static unsigned char *middle[MIDDLE];
+        size_t middle_bytes = 0;
+        for (int i = 0; i < MIDDLE; ++i) {
+            const size_t size = (size_t)(4 + i % 8) << 20;
+            middle[i] = __wrap_malloc(size);
+            assert(middle[i] != NULL && __wrap_malloc_usable_size(middle[i]) == size);
+            fill(middle[i], size, 20 + i);
+            middle_bytes += size;
+        }
+        assert(eden_heap_large_held(&blocks_alive) == middle_bytes && blocks_alive == MIDDLE);
+        assert(eden_heap_committed() == before_lowered);              // none of them in the pieces
+        unsigned char *under = __wrap_malloc((size_t)3 << 20);         // under the size: in the heap
+        assert(under != NULL && eden_heap_large_held(&blocks_alive) == middle_bytes && blocks_alive == MIDDLE);
+        fill(under, (size_t)3 << 20, 90);
+        unsigned char *over = __wrap_realloc(under, (size_t)5 << 20);  // past it: moved to its own
+        assert(over != NULL && eden_heap_large_held(&blocks_alive) == middle_bytes + ((size_t)5 << 20));
+        assert(blocks_alive == MIDDLE + 1);
+        verify(over, (size_t)3 << 20, 90);
+        unsigned char *again_under = __wrap_realloc(over, (size_t)1 << 20); // small again: back in the heap
+        assert(again_under != NULL && eden_heap_large_held(&blocks_alive) == middle_bytes && blocks_alive == MIDDLE);
+        verify(again_under, 4096, 90);                                 // its start, filled before
+        __wrap_free(again_under);
+        for (int i = 0; i < MIDDLE; ++i) {
+            verify(middle[i], (size_t)(4 + i % 8) << 20, 20 + i);
+            __wrap_free(middle[i]);
+        }
+        assert(eden_heap_large_held(&blocks_alive) == 0 && blocks_alive == 0);
+        eden_heap_set_large_request(1);                                // kept at 2 MiB, the pool's page
+        unsigned char *page = __wrap_malloc((size_t)2 << 20);
+        assert(page != NULL && eden_heap_large_held(&blocks_alive) == ((size_t)2 << 20));
+        __wrap_free(page);
+        eden_heap_set_large_request(0);                                // the default again
+        unsigned char *default_size = __wrap_malloc((size_t)24 << 20);
+        assert(default_size != NULL && eden_heap_large_held(&blocks_alive) == 0 && blocks_alive == 0);
+        __wrap_free(default_size);
+        printf("heap_bloque_propio=4: %d blocks of 4-11 MiB with memory of their own, all given back\n", MIDDLE);
     }
     // Fill the heap with blocks under the large size: the limit is its 6 GiB (3 GiB taken whole),
     // past the old 3 GiB, and running out returns NULL without damage.
@@ -555,8 +597,10 @@ with tempfile.TemporaryDirectory(prefix='eden-heap-') as work:
     for flags, label in ((['-O1', '-g', '-fsanitize=undefined', '-fno-sanitize-recover=all'], 'checked'),
                          (['-O2', '-fsanitize=thread'], 'thread sanitizer')):
         binary = work / ('heap-' + label.split()[0])
+        # The code range the heap's origin tracking reads (on the console tools/unwind.ld gives it).
+        text_range = ['-Wl,--defsym=__eden_text_start=__executable_start', '-Wl,--defsym=__eden_text_end=etext']
         subprocess.run(['clang-18', '-std=gnu11', '-pthread', '-Wall', '-Wextra', '-Wno-unused-function',
-                        '-Wno-unused-parameter', *flags, str(source), '-o', str(binary)], check=True)
+                        '-Wno-unused-parameter', *flags, str(source), *text_range, '-o', str(binary)], check=True)
         for mode in ((), ('whole',)):
             if label != 'checked' and mode:
                 continue
