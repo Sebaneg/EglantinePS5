@@ -12,8 +12,9 @@ van en un archivo de texto:
   vuelves a la biblioteca, empiezas el juego otra vez y ya está.
 - Una opción que quitas del archivo vuelve a su valor normal en la siguiente partida. Solo los
   filtros de registro (`log=`, `log_filter=`) duran hasta que se cierra la app.
-- El registro de la partida (`eden_log.txt` y `stderr.log`) dice cada opción que leyó:
-  `laboratorio: applied: ...`, o `unknown, ignored: ...` si una línea no se entiende.
+- `/data/eglantineps5/logs/stderr.log` dice cada opción que leyó, después de las líneas
+  `launch:` de la partida: `laboratorio: applied: ...`, o `unknown, ignored: ...` si una línea no
+  se entiende. Si no sale ninguna línea `laboratorio`, la app no encontró el archivo.
 - Sin archivo, la app funciona como siempre.
 
 Ejemplo:
@@ -56,7 +57,8 @@ pipeline_trace=on
 
 | Opción | Qué hace |
 |---|---|
-| `pipeline_trace=on` | Anota cada programa gráfico la primera vez que se usa. El último antes de un cuelgue es el sospechoso. |
+| `pipeline_trace=on` | Anota en `stderr.log` cada programa gráfico la primera vez que se usa: los de dibujo como `G1 ... vb=... fs=...` y los de cálculo como `C1 cs=...`. El último antes de un cuelgue es el sospechoso. |
+| `saltar_programa=HASH` | No dibuja lo que usa ese programa. `HASH` es uno de los valores que lista `pipeline_trace` (`vb=` o `fs=`), por ejemplo `saltar_programa=123a38a857540697`. Se pueden poner varias líneas. Solo sirve para programas de dibujo: los de cálculo no se pueden saltar. |
 | `submit_sync=on` | Espera a la GPU después de cada envío. Muy lento, pero el cuelgue queda en el envío exacto. |
 | `gpu_time=on` | Mide el tiempo de la GPU de cada envío. |
 | `radv_debug=...` | Opciones del controlador gráfico, separadas por comas. Por ejemplo `radv_debug=syncshaders` (espera a cada programa) o `radv_debug=nodcc,nohiz` (sin compresiones). |

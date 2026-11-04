@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
+#include <algorithm>
+#include <vector>
 // Development A/B switches for Vulkan device features, set from /app0/dev-settings.txt
 // before the renderer creates its device (tools/prepare-vulkan-port.py applies them).
 namespace Eden::DevVulkan {
@@ -16,6 +18,12 @@ inline bool sparse_tiles = false;
 // Lab file teselacion=off: draws with tessellation stages are skipped. Mario Kart World hung the
 // GPU about two seconds after its first tessellation pipelines, with or without sparse images.
 inline bool skip_tessellation = false;
+// Lab file saltar_programa=<hash>: draws whose pipeline has a stage with this hash (as
+// pipeline_trace=on lists them, vb=/fs=...) are skipped. Several lines skip several programs.
+inline std::vector<unsigned long long> skip_programs;
+inline bool SkipProgram(unsigned long long hash) {
+    return hash != 0 && std::find(skip_programs.begin(), skip_programs.end(), hash) != skip_programs.end();
+}
 // Standard border colours only (no RADV border table). On by default: with custom colours
 // some games fault the GPU at page 0. Not the driver: RADV's custom border colours read back
 // exactly on the console; the cause is open. The three

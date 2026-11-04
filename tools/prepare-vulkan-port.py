@@ -1145,6 +1145,38 @@ shader_costs = [
      '        }\n'
      '        current_pipeline = nullptr;\n'
      '        return nullptr;\n'
+     '    }\n'
+     '    if (!::Eden::DevVulkan::skip_programs.empty()) {\n'
+     '        for (const u64 hash : graphics_key.unique_hashes) {\n'
+     '            if (!::Eden::DevVulkan::SkipProgram(hash)) continue;\n'
+     '            static std::unordered_set<u64> told;\n'
+     '            if (told.insert(hash).second) {\n'
+     '                char text[96];\n'
+     '                std::snprintf(text, sizeof(text), "saltar_programa: draws with %llx are skipped",\n'
+     '                              (unsigned long long)hash);\n'
+     '                ::Eden::Report("laboratorio", text);\n'
+     '            }\n'
+     '            current_pipeline = nullptr;\n'
+     '            return nullptr;\n'
+     '        }\n'
+     '    }\n'),
+    # pipeline_trace=on also lists compute programs at their first use (C1, C2...).
+    ('    const ShaderInfo* const shader{ComputeShader()};\n'
+     '    if (!shader) {\n'
+     '        return nullptr;\n'
+     '    }\n',
+     '    const ShaderInfo* const shader{ComputeShader()};\n'
+     '    if (!shader) {\n'
+     '        return nullptr;\n'
+     '    }\n'
+     '    if (::Eden::DevVulkan::trace_pipelines) {\n'
+     '        static std::unordered_set<u64> traced_compute;\n'
+     '        if (traced_compute.insert(shader->unique_hash).second) {\n'
+     '            char text[96];\n'
+     '            std::snprintf(text, sizeof(text), "C%zu cs=%llx", traced_compute.size(),\n'
+     '                          (unsigned long long)shader->unique_hash);\n'
+     '            ::Eden::Report("pipeline", text);\n'
+     '        }\n'
      '    }\n'),
     # Development crash probes: report each pipeline's first use (stage hashes) to klog,
     # which survives a GPU fault that kills the title.

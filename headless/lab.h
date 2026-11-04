@@ -84,6 +84,7 @@ inline void Restore() {
     DevVulkan::compute_barriers = d.compute_barriers;
     DevVulkan::sparse_tiles = d.sparse_tiles;
     DevVulkan::skip_tessellation = d.skip_tessellation;
+    DevVulkan::skip_programs.clear();
     DevVulkan::hcr_mode = d.hcr_mode;
     eden_jit_shared = d.jit_shared;
     Performance::gc_keep_dirty = d.gc_keep_dirty;
@@ -126,7 +127,15 @@ inline bool ApplyEarly(const std::string& entry, bool& block_list_set) {
     // Graphics (Vulkan).
     if (entry == "teselacion=off") DevVulkan::skip_tessellation = true;
     else if (entry == "teselacion=on") DevVulkan::skip_tessellation = false;
-    else if (entry == "dispersas=on") DevVulkan::sparse_tiles = true;
+    else if (entry.starts_with("saltar_programa=")) {
+        // A stage hash as pipeline_trace=on lists it, with or without 0x.
+        std::string hex = entry.substr(16);
+        if (hex.starts_with("0x") || hex.starts_with("0X")) hex.erase(0, 2);
+        char* end = nullptr;
+        const unsigned long long hash = std::strtoull(hex.c_str(), &end, 16);
+        if (hex.empty() || hash == 0 || *end != '\0') return false;
+        DevVulkan::skip_programs.push_back(hash);
+    } else if (entry == "dispersas=on") DevVulkan::sparse_tiles = true;
     else if (entry == "dispersas=off") DevVulkan::sparse_tiles = false;
     else if (entry == "sparse=off") DevVulkan::disable_sparse = true;
     else if (entry == "multirange=off") DevVulkan::disable_multi_range = true;
