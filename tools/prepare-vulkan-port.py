@@ -236,6 +236,9 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
     ('void RasterizerVulkan::Clear(u32 layer_count) {', 'void RasterizerVulkan::Clear(u32 layer_count) {\n    SCOPE_EXIT { SyncProbe(scheduler, "clear", nullptr); };'),
     ('    ComputePipeline* const pipeline{pipeline_cache.CurrentComputePipeline()};\n    if (!pipeline) {\n        if (kepler_compute->IsNativeMode()) throw Shader::RuntimeError("Native compute pipeline unavailable");\n        return;\n    }',
      '    ComputePipeline* const pipeline{pipeline_cache.CurrentComputePipeline()};\n    if (!pipeline) {\n        if (kepler_compute->IsNativeMode()) throw Shader::RuntimeError("Native compute pipeline unavailable");\n        return;\n    }\n'
+     # Lab file saltar_programa=<cs hash>: the pipeline exists (native dispatches need it), the
+     # dispatch is not recorded.
+     '    if (std::exchange(::Eden::DevVulkan::skip_next_dispatch, false)) {\n        return;\n    }\n'
      '    SCOPE_EXIT { SyncProbe(scheduler, "dispatch", pipeline); };'),
 ])
 # Host conditional rendering (VK_EXT_conditional_rendering, dev_vulkan.h hcr_mode): count each
@@ -1168,6 +1171,16 @@ shader_costs = [
      '    const ShaderInfo* const shader{ComputeShader()};\n'
      '    if (!shader) {\n'
      '        return nullptr;\n'
+     '    }\n'
+     '    ::Eden::DevVulkan::skip_next_dispatch = ::Eden::DevVulkan::SkipProgram(shader->unique_hash);\n'
+     '    if (::Eden::DevVulkan::skip_next_dispatch) {\n'
+     '        static std::unordered_set<u64> told_compute;\n'
+     '        if (told_compute.insert(shader->unique_hash).second) {\n'
+     '            char text[96];\n'
+     '            std::snprintf(text, sizeof(text), "saltar_programa: dispatches of %llx are skipped",\n'
+     '                          (unsigned long long)shader->unique_hash);\n'
+     '            ::Eden::Report("laboratorio", text);\n'
+     '        }\n'
      '    }\n'
      '    if (::Eden::DevVulkan::trace_pipelines) {\n'
      '        static std::unordered_set<u64> traced_compute;\n'

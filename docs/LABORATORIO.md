@@ -58,7 +58,7 @@ pipeline_trace=on
 | Opción | Qué hace |
 |---|---|
 | `pipeline_trace=on` | Anota en `stderr.log` cada programa gráfico la primera vez que se usa: los de dibujo como `G1 ... vb=... fs=...` y los de cálculo como `C1 cs=...`. El último antes de un cuelgue es el sospechoso. |
-| `saltar_programa=HASH` | No dibuja lo que usa ese programa. `HASH` es uno de los valores que lista `pipeline_trace` (`vb=` o `fs=`), por ejemplo `saltar_programa=123a38a857540697`. Se pueden poner varias líneas. Solo sirve para programas de dibujo: los de cálculo no se pueden saltar. |
+| `saltar_programa=HASH` | No ejecuta lo que usa ese programa. `HASH` es uno de los valores que lista `pipeline_trace`: `vb=` o `fs=` de un programa de dibujo, o `cs=` de uno de cálculo. Por ejemplo `saltar_programa=929ba7ee0d94ab75`. Se pueden poner varias líneas. Saltarse un cálculo puede romper el juego de otras formas: es solo para averiguar qué cuelga la GPU. |
 | `submit_sync=on` | Espera a la GPU después de cada envío. Muy lento, pero el cuelgue queda en el envío exacto. |
 | `gpu_time=on` | Mide el tiempo de la GPU de cada envío. |
 | `radv_debug=...` | Opciones del controlador gráfico, separadas por comas. Por ejemplo `radv_debug=syncshaders` (espera a cada programa) o `radv_debug=nodcc,nohiz` (sin compresiones). |

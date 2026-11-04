@@ -24,6 +24,9 @@ inline std::vector<unsigned long long> skip_programs;
 inline bool SkipProgram(unsigned long long hash) {
     return hash != 0 && std::find(skip_programs.begin(), skip_programs.end(), hash) != skip_programs.end();
 }
+// Set by the compute pipeline lookup for a skipped compute program; the dispatch that asked for
+// it records nothing (its pipeline still exists: native dispatches need one).
+inline thread_local bool skip_next_dispatch = false;
 // Standard border colours only (no RADV border table). On by default: with custom colours
 // some games fault the GPU at page 0. Not the driver: RADV's custom border colours read back
 // exactly on the console; the cause is open. The three
