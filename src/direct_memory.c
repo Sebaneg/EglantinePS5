@@ -34,7 +34,7 @@ extern void evict_all_unused_textures(void) __attribute__((weak));
 
 static atomic_flag eden_direct_lock = ATOMIC_FLAG_INIT;
 static int64_t eden_direct_floor;                 /* the lowest block taken at the top; 0: none yet */
-static int64_t eden_direct_holes[1024];           /* 2 MiB blocks given back above the floor */
+static int64_t eden_direct_holes[4096];           /* 2 MiB blocks given back above the floor */
 static unsigned eden_direct_hole_count;
 
 static void eden_direct_acquire(void) {
