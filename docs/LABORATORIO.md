@@ -53,6 +53,16 @@ pipeline_trace=on
 | `graphics_usage=driver` | Mide la memoria gráfica como la cuenta el controlador. |
 | `dispatch_draws=8` … `512` | Dibujos entre entregas al hilo de Vulkan (potencia de 2). |
 
+## Envío de imágenes a la tele
+
+`stderr.log` dice en cada partida cómo se envían: `present: frames in flight ..., swapchain images ..., vsync mode ..., present thread ...`.
+
+| Opción | Qué hace |
+|---|---|
+| `vsync=fifo` / `mailbox` / `immediate` / `relaxed` | Cómo espera al refresco de la tele. `fifo` es el normal; si el controlador de la PS5 no admite otro, usa `fifo` igualmente. |
+| `presentacion_hilo=on` / `off` | Envía las imágenes desde un hilo aparte (`off` es el normal). |
+| `imagenes=1` … `7` | Cuántas imágenes pueden ir en cola a la vez. Menos imágenes: menos ráfagas, pero puede ir más lento. |
+
 ## Diagnóstico de la GPU
 
 | Opción | Qué hace |

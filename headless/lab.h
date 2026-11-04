@@ -48,6 +48,8 @@ struct Defaults {
     bool vertex_input_dynamic;
     ::Settings::GpuClock gpu_clock;
     ::Settings::ExtendedDynamicState dyna_state;
+    ::Settings::VSyncMode vsync;
+    bool async_presentation;
 };
 
 inline const Defaults& Initial() {
@@ -63,7 +65,8 @@ inline const Defaults& Initial() {
         Performance::idle_spin_iterations.load(), Performance::dispatch_mask.load(),
         ::Settings::values.accelerate_astc.GetValue(),
         ::Settings::values.vertex_input_dynamic_state.GetValue(),
-        ::Settings::values.gpu_clock.GetValue(), ::Settings::values.dyna_state.GetValue()};
+        ::Settings::values.gpu_clock.GetValue(), ::Settings::values.dyna_state.GetValue(),
+        ::Settings::values.vsync_mode.GetValue(), ::Settings::values.async_presentation.GetValue()};
     return d;
 }
 
@@ -96,6 +99,9 @@ inline void Restore() {
     ::Settings::values.vertex_input_dynamic_state.SetValue(d.vertex_input_dynamic);
     ::Settings::values.gpu_clock.SetValue(d.gpu_clock);
     ::Settings::values.dyna_state.SetValue(d.dyna_state);
+    ::Settings::values.vsync_mode.SetValue(d.vsync);
+    ::Settings::values.async_presentation.SetValue(d.async_presentation);
+    DevVulkan::present_frames = 0;
 }
 
 // The lines of the lab file, without comments, blanks and trailing spaces.
@@ -163,6 +169,15 @@ inline bool ApplyEarly(const std::string& entry, bool& block_list_set) {
         ::Settings::values.gpu_clock.SetValue(entry.ends_with("normal") ? ::Settings::GpuClock::Normal
                                             : entry.ends_with("boost") ? ::Settings::GpuClock::Boost
                                                                        : ::Settings::GpuClock::Overclock);
+    // Presentation: how finished frames reach the TV, read when the game's renderer starts.
+    else if (entry == "vsync=fifo") ::Settings::values.vsync_mode.SetValue(::Settings::VSyncMode::Fifo);
+    else if (entry == "vsync=mailbox") ::Settings::values.vsync_mode.SetValue(::Settings::VSyncMode::Mailbox);
+    else if (entry == "vsync=immediate") ::Settings::values.vsync_mode.SetValue(::Settings::VSyncMode::Immediate);
+    else if (entry == "vsync=relaxed") ::Settings::values.vsync_mode.SetValue(::Settings::VSyncMode::FifoRelaxed);
+    else if (entry == "presentacion_hilo=on" || entry == "presentacion_hilo=off")
+        ::Settings::values.async_presentation.SetValue(entry.ends_with("on"));
+    else if (entry.starts_with("imagenes=") && Number(entry, 9, n) && n >= 1 && n <= 7)
+        DevVulkan::present_frames = static_cast<unsigned>(n);
     else if (entry == "graphics_usage=driver") Performance::graphics_usage_from_pool = false;
     else if (entry == "gc_dirty=upstream") Performance::gc_keep_dirty = false;
     else if (entry.starts_with("dispatch_draws=") && Number(entry, 15, n) && n >= 8 && n <= 512 && (n & (n - 1)) == 0)

@@ -424,7 +424,21 @@ adapt('src/video_core/renderer_vulkan/vk_present_manager.h',
 ])
 adapt('src/video_core/renderer_vulkan/vk_present_manager.cpp', 'vulkan_present_manager.cpp', [
     ('#include "video_core/renderer_vulkan/vk_present_manager.h"',
-     '#include "video_core/renderer_vulkan/vk_present_manager.h"\n#include "gpu_failure.h"\n#include "performance.h"'),
+     '#include "video_core/renderer_vulkan/vk_present_manager.h"\n#include <cstdio>\n#include "dev_vulkan.h"\n#include "diagnostics.h"\n#include "gpu_failure.h"\n#include "performance.h"'),
+    # Lab file imagenes=N limits the frames in flight; every session says how it presents.
+    ('    swapchain_image_count = swapchain.GetImageCount();\n',
+     '    if (::Eden::DevVulkan::present_frames != 0) {\n'
+     '        image_count = std::min<size_t>(static_cast<size_t>(image_count), ::Eden::DevVulkan::present_frames);\n'
+     '    }\n'
+     '    {\n'
+     '        char text[160];\n'
+     '        std::snprintf(text, sizeof(text), "frames in flight %zu, swapchain images %u, vsync mode %d, present thread %d",\n'
+     '                      static_cast<size_t>(image_count), unsigned(swapchain.GetImageCount()),\n'
+     '                      int(Settings::values.vsync_mode.GetValue()),\n'
+     '                      int(Settings::values.async_presentation.GetValue()));\n'
+     '        ::Eden::Report("present", text);\n'
+     '    }\n'
+     '    swapchain_image_count = swapchain.GetImageCount();\n'),
     # GetRenderFrame runs on the GPU thread: time its free-frame and
     # present-completion waits (FIFO back-pressure on the producer).
     ('    // Wait for free presentation frames\n    std::unique_lock lock{free_mutex};',
