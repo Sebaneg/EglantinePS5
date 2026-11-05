@@ -1407,7 +1407,8 @@ probes = {
 }
 for name, index, expected in (
     ('vk_fence_manager', 6, 1), ('vk_buffer_cache', 7, 3),
-    ('vk_texture_cache', 8, 1), ('vk_swapchain', 9, 6),
+    # vk_texture_cache: the second is Eglantine patch 0006's wait between ASTC pieces.
+    ('vk_texture_cache', 8, 2), ('vk_swapchain', 9, 6),
     ('vk_descriptor_buffer', 10, 2), ('vk_multi_range_buffer', 11, 1),
     ('vk_compute_pass', 12, 1),
 ):

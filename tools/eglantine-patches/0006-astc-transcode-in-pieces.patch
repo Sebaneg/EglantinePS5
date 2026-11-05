@@ -1,0 +1,111 @@
+diff --git a/src/video_core/renderer_vulkan/vk_texture_cache.cpp b/src/video_core/renderer_vulkan/vk_texture_cache.cpp
+index 615fe3b..67c5554 100644
+--- a/src/video_core/renderer_vulkan/vk_texture_cache.cpp
++++ b/src/video_core/renderer_vulkan/vk_texture_cache.cpp
+@@ -4923,6 +4923,7 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
+     if (reusable != free_transcodes.end()) {
+         pending = std::move(*reusable);
+         free_transcodes.erase(reusable);
++        pending.chunk_views.clear(); // the GPU is done with them
+     } else {
+         pending = PendingTranscode{
+             .tick = 0,
+@@ -4966,10 +4967,27 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
+         },
+         map, swizzles);
+ 
+-    // Encode every level into one buffer, then copy it into the image.
++    // Encode every level into one buffer, then copy it into the image; a texture larger than
++    // EDEN_NX2_TRANSCODE_CHUNK_MIB (default 32; 0: no limit) goes in pieces, a run of layers of one
++    // level each. Encoded whole, title 1's largest one asked the pool for one 121 MiB buffer with
++    // 107 MiB in its largest free block, and the session ended.
++    static const u64 chunk_limit = [] {
++        const char* value = std::getenv("EDEN_NX2_TRANSCODE_CHUNK_MIB");
++        return (value != nullptr ? std::strtoull(value, nullptr, 10) : 32ULL) << 20;
++    }();
+     const bool bc3 = !IsOpaqueBc1Astc(device, info) &&
+                      Settings::GetAstcRecompression() != Settings::AstcRecompression::Bc1;
+     const u64 block_bytes = bc3 ? 16 : 8;
++    const auto encoded_barrier = [](vk::CommandBuffer cmdbuf) {
++        const VkMemoryBarrier barrier{
++            .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
++            .pNext = nullptr,
++            .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
++            .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
++        };
++        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
++                               0, barrier);
++    };
+     boost::container::small_vector<VideoCommon::BufferImageCopy, 16> copies;
+     u64 total = 0;
+     for (u32 level = 0; level < levels; ++level) {
+@@ -4993,22 +5011,47 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
+         });
+         total += size;
+     }
++    if (chunk_limit != 0 && total > chunk_limit) {
++        for (u32 level = 0; level < levels; ++level) {
++            const VideoCommon::BufferImageCopy& whole = copies[level];
++            const u64 layer_bytes = whole.buffer_size / layers;
++            // One layer at least, even when a single layer is larger than the limit.
++            const u32 per_piece =
++                static_cast<u32>(std::clamp<u64>(chunk_limit / layer_bytes, 1, layers));
++            for (u32 first = 0; first < layers; first += per_piece) {
++                const u32 count = (std::min)(per_piece, layers - first);
++                const u64 size = layer_bytes * count;
++                VkImageView source = *pending.views[level];
++                if (count != layers) {
++                    pending.chunk_views.push_back(MakeStorageView(
++                        device.GetLogical(), level, *pending.image, DecodeFormat, first, count));
++                    source = *pending.chunk_views.back();
++                }
++                const auto output = staging_buffer_pool.Request(size, MemoryUsage::DeviceLocal);
++                bc_encoder_pass->Encode(source, whole.image_extent.width, whole.image_extent.height,
++                                        count, bc3, output.buffer, output.offset, size, 0);
++                scheduler.Record(encoded_barrier);
++                VideoCommon::BufferImageCopy piece = whole;
++                piece.buffer_offset = 0;
++                piece.buffer_size = size;
++                piece.image_subresource.base_layer = static_cast<s32>(first);
++                piece.image_subresource.num_layers = static_cast<s32>(count);
++                image.UploadMemory(output.buffer, output.offset, std::span{&piece, 1});
++                // The next piece takes this buffer again once the GPU is past it.
++                scheduler.Finish();
++            }
++        }
++        // The GPU is done with the decode image (four times the BC size) as well: it goes now,
++        // with its views, instead of at the next frame.
++        return;
++    }
+     const auto output = staging_buffer_pool.Request(total, MemoryUsage::DeviceLocal);
+     for (u32 level = 0; level < levels; ++level) {
+         bc_encoder_pass->Encode(*pending.views[level], copies[level].image_extent.width,
+                                 copies[level].image_extent.height, layers, bc3, output.buffer,
+                                 output.offset, total, copies[level].buffer_offset);
+     }
+-    scheduler.Record([](vk::CommandBuffer cmdbuf) {
+-        const VkMemoryBarrier barrier{
+-            .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+-            .pNext = nullptr,
+-            .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+-            .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
+-        };
+-        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+-                               0, barrier);
+-    });
++    scheduler.Record(encoded_barrier);
+     image.UploadMemory(output.buffer, output.offset, copies);
+     pending.tick = scheduler.CurrentTick();
+     pending_transcodes.push_back(std::move(pending));
+diff --git a/src/video_core/renderer_vulkan/vk_texture_cache.h b/src/video_core/renderer_vulkan/vk_texture_cache.h
+index 069bec7..38c370b 100644
+--- a/src/video_core/renderer_vulkan/vk_texture_cache.h
++++ b/src/video_core/renderer_vulkan/vk_texture_cache.h
+@@ -292,6 +292,7 @@ public:
+         u64 tick;
+         vk::Image image;
+         std::vector<vk::ImageView> views;
++        std::vector<vk::ImageView> chunk_views; ///< Layer runs encoded piece by piece
+         u32 width;
+         u32 height;
+         u32 levels;
