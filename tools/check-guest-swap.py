@@ -188,6 +188,9 @@ extern "C" std::int32_t sceKernelDirectMemoryQuery(std::int64_t offset, int, Ede
 namespace Common {
 void SetGuestMemorySwap(bool on, const char* path, unsigned cold_seconds) noexcept;
 void SetGuestBlocksHigh(bool on) noexcept;
+}
+extern "C" std::size_t eden_guest_memory_emergency(std::size_t wanted) noexcept;
+namespace Common {
 int GuestMemorySlotState(std::uint64_t offset) noexcept;
 void GuestMemoryUsage(std::size_t* span, std::size_t* held) noexcept;
 void ClearGuestMemory(std::uint8_t* at, std::uint64_t offset, std::size_t bytes, int fill) noexcept;
@@ -242,12 +245,22 @@ int main(int argc, char** argv) {
     if (Count(Slots, 1) != Written) { std::fprintf(stderr, "%zu slots Own after the writes\n", Count(Slots, 1)); return 1; }
     const std::size_t held_written = Held();
 
-    // A pool in pieces (its largest block small, much free in all) is not short of memory: slots go
-    // on probation, none to the file, since that would free nothing larger.
+    // A pool in pieces (its largest block small, much free in all): with the guest's blocks at the
+    // top, the edge next to the graphics goes out, the lowest blocks first, but when the largest
+    // block does not grow (here it never does) the swapper stops after 64 MiB and waits.
     mock::largest_override = std::int64_t{100} << 20; mock::free_override = std::int64_t{2} << 30;
-    std::this_thread::sleep_for(std::chrono::seconds(4));
-    if (Count(Slots, 5) != 0) { std::fprintf(stderr, "%zu slots swapped with 2 GiB free\n", Count(Slots, 5)); return 1; }
-    std::printf("pool in pieces: %zu slots on probation, none swapped with 2 GiB free in all\n", Count(Slots, 4));
+    std::this_thread::sleep_for(std::chrono::seconds(6));
+    {
+        const std::size_t out = Count(Slots, 5);
+        if (out == 0 || out > 32) { std::fprintf(stderr, "%zu slots swapped for a block that never grows\n", out); return 1; }
+        std::printf("pool in pieces: %zu slots out, then the swapper waited (the largest block did not grow)\n", out);
+    }
+    // Plenty again, a round of the swapper later (it probes no more), every slot read back.
+    mock::largest_override = std::int64_t{3} << 30; mock::free_override = std::int64_t{3} << 30;
+    std::this_thread::sleep_for(std::chrono::milliseconds(600));
+    for (std::size_t slot = 0; slot < Written; ++slot)
+        if (!Verify(base, slot, 1)) return 1;
+    WaitFor("the slots read back", [&] { return Count(Slots, 1) == Written; }, 10);
 
     // The pool looks short: every written slot goes on probation, then to the file.
     mock::largest_override = std::int64_t{100} << 20; mock::free_override = std::int64_t{100} << 20;
@@ -330,6 +343,17 @@ int main(int argc, char** argv) {
     std::printf("under the swapper: %llu touches in 8 s from 8 threads, every byte as last written\n",
                 (unsigned long long)touches.load());
     mock::largest_override = std::int64_t{3} << 30; mock::free_override = std::int64_t{3} << 30;
+
+    // A graphics allocation refused: the slots go out at once, in use or not, and come back intact.
+    for (std::size_t slot = 0; slot < Written; ++slot)
+        if (slot != 3) Fill(base, slot, 50);
+    mock::largest_override = std::int64_t{10} << 20;
+    const std::size_t rescued = eden_guest_memory_emergency(std::size_t{256} << 20);
+    if (rescued < (std::size_t{100} << 20)) { std::fprintf(stderr, "emergency sent %zu MiB\n", rescued >> 20); return 1; }
+    mock::largest_override = std::int64_t{3} << 30; mock::free_override = std::int64_t{3} << 30;
+    for (std::size_t slot = 0; slot < Written; ++slot)
+        if (slot != 3 && !Verify(base, slot, 50)) return 1;
+    std::printf("emergency: %zu MiB out at once, every byte back as written\n", rescued >> 20);
 
     Common::FreeGuestMemory(base, Size);
     if (mock::taken.load() > (std::size_t{64} << 20)) {

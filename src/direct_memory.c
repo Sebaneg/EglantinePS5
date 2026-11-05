@@ -45,9 +45,15 @@ int eden_direct_high(size_t size, size_t alignment, int type, int64_t *start) {
   const int64_t bytes = (int64_t)size;
   if (bytes <= 0 || total <= 0) return __real_sceKernelAllocateDirectMemory(0, total, size, alignment, type, start);
   eden_direct_acquire();
-  /* A block given back earlier left a hole of its size. */
+  /* A block given back earlier left a hole of its size: the highest first, so that the blocks
+   * at the edge of the top part, which the guest memory's swapper gives back to make the graphics'
+   * largest block larger (juego_arriba=on), are the last to be taken again. */
   while (size == EDEN_DIRECT_SMALL && eden_direct_hole_count != 0) {
-    const int64_t hole = eden_direct_holes[--eden_direct_hole_count];
+    unsigned highest = 0;
+    for (unsigned i = 1; i < eden_direct_hole_count; ++i)
+      if (eden_direct_holes[i] > eden_direct_holes[highest]) highest = i;
+    const int64_t hole = eden_direct_holes[highest];
+    eden_direct_holes[highest] = eden_direct_holes[--eden_direct_hole_count];
     if (__real_sceKernelAllocateDirectMemory(hole, hole + bytes, size, alignment, type, start) == 0) {
       eden_direct_release();
       return 0;

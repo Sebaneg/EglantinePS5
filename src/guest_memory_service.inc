@@ -51,7 +51,7 @@ struct Counters {
     std::atomic<std::uint64_t> returns_clear{0}, returns_free{0}, returns_scan{0}, dedup{0};
     std::atomic<std::uint64_t> reserve_used{0}, failures{0}, passes{0}, scan_ns{0};
     std::atomic<std::uint64_t> fined{0}, unfined{0}, fine_failures{0};
-    std::atomic<std::uint64_t> probes{0}, probe_hits{0}, swap_outs{0}, swap_ins{0}, swap_failures{0};
+    std::atomic<std::uint64_t> probes{0}, probe_hits{0}, swap_outs{0}, swap_ins{0}, swap_failures{0}, emergencies{0};
 };
 Counters counters;
 void ResetCounters() noexcept {
@@ -59,7 +59,8 @@ void ResetCounters() noexcept {
                           &counters.returns_clear, &counters.returns_free, &counters.returns_scan, &counters.dedup,
                           &counters.reserve_used, &counters.failures, &counters.passes, &counters.scan_ns,
                           &counters.fined, &counters.unfined, &counters.fine_failures, &counters.probes,
-                          &counters.probe_hits, &counters.swap_outs, &counters.swap_ins, &counters.swap_failures})
+                          &counters.probe_hits, &counters.swap_outs, &counters.swap_ins, &counters.swap_failures,
+                          &counters.emergencies})
         counter->store(0, std::memory_order_relaxed);
 }
 
@@ -1105,12 +1106,12 @@ void ServiceReport(SparseRange& range, const char* when) noexcept {
         char swap_line[256];
         const int swap_length = std::snprintf(swap_line, sizeof(swap_line),
             "EDEN_SWAP %s probation=%zu (%zuMiB) swapped=%zu (%zuMiB) file=%zuMiB probes=%llu probe_hits=%llu "
-            "swap_outs=%llu swap_ins=%llu failures=%llu\n",
+            "swap_outs=%llu swap_ins=%llu failures=%llu emergencies=%llu\n",
             when, probe, probe * (SparseSlot >> 20), swapped, swapped * (SparseSlot >> 20),
             swap_largest.load(std::memory_order_relaxed) * (SparseSlot >> 20),
             (unsigned long long)counters.probes.load(), (unsigned long long)counters.probe_hits.load(),
             (unsigned long long)counters.swap_outs.load(), (unsigned long long)counters.swap_ins.load(),
-            (unsigned long long)counters.swap_failures.load());
+            (unsigned long long)counters.swap_failures.load(), (unsigned long long)counters.emergencies.load());
         if (swap_length > 0) Report(swap_line);
     }
     // Who wrote the slots that were promoted: the largest places (offsets in the app's image).
@@ -1202,7 +1203,12 @@ std::thread swapper;
 std::atomic<unsigned> swap_cold_seconds{8};
 constexpr std::size_t SwapProbeBytes = std::size_t{2560} << 20, SwapShortBytes = std::size_t{1024} << 20;
 constexpr std::size_t SwapEnoughBytes = std::size_t{1536} << 20, SwapQuietBytes = std::size_t{3072} << 20;
-constexpr std::size_t ProbePerRound = 64, SwapPerRound = 32;
+constexpr std::size_t ProbePerRound = 32, SwapPerRound = 32;
+// juego_arriba=on: under this largest block the edge of the guest's part goes out, until this; and
+// after this much sent out for it with less growth than this, the swapper waits that many seconds.
+constexpr std::size_t SwapBlockShortBytes = std::size_t{512} << 20, SwapBlockEnoughBytes = std::size_t{768} << 20;
+constexpr std::size_t SwapBlockStreakBytes = std::size_t{64} << 20, SwapBlockGain = std::size_t{16} << 20;
+constexpr std::uint32_t SwapBlockPauseSeconds = 10;
 
 std::size_t PoolLargestFree() noexcept {
     const std::int64_t total = sceKernelGetDirectMemorySize();
@@ -1230,6 +1236,8 @@ void SwapperLoop(SparseRange* range) {
     const auto started = std::chrono::steady_clock::now();
     const std::size_t slots = (range->end - range->begin.load(std::memory_order_relaxed)) / SparseSlot;
     std::size_t hand = 0;
+    std::size_t streak_bytes = 0, streak_largest = 0; // sent out for the largest block, and it then
+    std::uint32_t paused_until = 0;
     std::unique_lock lock{scanner_mutex};
     while (!scanner_stop) {
         scanner_wake.wait_for(lock, std::chrono::milliseconds(250), [] { return scanner_stop; });
@@ -1257,18 +1265,52 @@ void SwapperLoop(SparseRange* range) {
                 UnlockSlot(*range, slot, put ? SlotProbe : state);
             }
         }
-        const unsigned cold = swap_cold_seconds.load(std::memory_order_relaxed);
-        for (std::size_t slot = 0, sent = 0; slot < slots && sent < SwapPerRound &&
-                                             (free < SwapEnoughBytes || wanted) &&
-                                             (free < SwapShortBytes || wanted || sent != 0);
-             ++slot) {
-            if (SlotState(*range, slot) != SlotProbe || now - range->probe_at[slot] < cold) continue;
-            LockSlot(*range, slot);
-            const bool out = SlotState(*range, slot) == SlotProbe && SwapOut(*range, slot);
-            UnlockSlot(*range, slot, out ? SlotSwapped : SlotState(*range, slot));
-            if (out) {
+        // With juego_arriba=on, the graphics need the pool's largest block, and only the guest's
+        // blocks at the edge of its top part, next to the graphics, make it larger when they go: so
+        // then it also sends slots out while that block is under 512 MiB, the lowest blocks first,
+        // and the blocks given back are taken again from the top down (src/direct_memory.c). Mario
+        // Kart World's race countdown ended with 1.1 GB sent out from all over the guest's part,
+        // 1 GB free in all and the largest block at 22 MiB for a 16 MiB graphics buffer.
+        const bool high = guest_blocks_high.load(std::memory_order_relaxed);
+        std::size_t largest = high ? PoolLargestFree() : ~std::size_t{0};
+        const bool short_free = free < SwapShortBytes || wanted;
+        const bool short_block = high && largest < SwapBlockShortBytes;
+        if (short_block && !short_free && largest >= streak_largest + SwapBlockGain) {
+            streak_bytes = 0; // the block grew: what was sent out helps
+            streak_largest = largest;
+        }
+        const bool paused = !short_free && now < paused_until;
+        if ((short_free || short_block) && !paused) {
+            const unsigned cold = swap_cold_seconds.load(std::memory_order_relaxed);
+            std::vector<std::pair<std::int64_t, std::size_t>> candidates;
+            for (std::size_t slot = 0; slot < slots; ++slot)
+                if (SlotState(*range, slot) == SlotProbe && now - range->probe_at[slot] >= cold)
+                    candidates.emplace_back(range->physical[slot], slot);
+            if (high) std::sort(candidates.begin(), candidates.end());
+            std::size_t sent = 0;
+            for (const auto& candidate : candidates) {
+                if (sent >= SwapPerRound) break;
+                if (!short_free && largest >= SwapBlockEnoughBytes && free >= SwapEnoughBytes) break;
+                if (short_free && !short_block && free >= SwapEnoughBytes) break;
+                const std::size_t slot = candidate.second;
+                LockSlot(*range, slot);
+                const bool out = SlotState(*range, slot) == SlotProbe && SwapOut(*range, slot);
+                UnlockSlot(*range, slot, out ? SlotSwapped : SlotState(*range, slot));
+                if (!out) continue;
                 ++sent;
                 free += SparseSlot;
+                if (high && sent % 8 == 0) largest = PoolLargestFree();
+            }
+            // Sent out for the largest block alone, and it did not grow: the blocks at the edge are
+            // not the guest's (the graphics' own pieces are in the way). Wait a while.
+            if (sent != 0 && !short_free) {
+                if (streak_bytes == 0) streak_largest = largest;
+                streak_bytes += sent * SparseSlot;
+                if (streak_bytes >= SwapBlockStreakBytes) {
+                    if (largest < streak_largest + SwapBlockGain) paused_until = now + SwapBlockPauseSeconds;
+                    streak_bytes = 0;
+                    streak_largest = largest;
+                }
             }
         }
         lock.lock();
@@ -1537,6 +1579,46 @@ void SetGuestMemoryService(bool on, bool scan, bool dedup) noexcept {
 // waits for it to be made whole (a fault and a 2 MiB copy, about 0.3 ms).
 void SetGuestMemoryFine(bool on) noexcept {
     fine_requested.store(on, std::memory_order_relaxed);
+}
+
+// A graphics allocation was refused (headless vulkan_memory_allocator.cpp): before the session ends,
+// the guest's blocks go to the swap file at once, Own ones too, from the edge next to the graphics
+// (the lowest first with juego_arriba=on), until the pool's largest block reaches `wanted` or 512 MiB
+// went. The bytes sent; 0 without swap=on. A slot locked by someone else is left alone. Nearly every
+// session of Mario Kart World so far ended with a graphics block refused while hundreds of MiB of
+// the guest's memory could have gone (the swapper looks every 250 ms; the refusal ends it at once).
+extern "C" std::size_t eden_guest_memory_emergency(std::size_t wanted) noexcept {
+#ifdef PS5_NATIVE
+    SparseRange* const range = service_range.load(std::memory_order_acquire);
+    if (range == nullptr || range->swap == nullptr || swap_fd < 0) return 0;
+    static std::mutex emergency;
+    const std::lock_guard guard{emergency};
+    const std::size_t slots = (range->end - range->begin.load(std::memory_order_relaxed)) / SparseSlot;
+    std::vector<std::pair<std::int64_t, std::size_t>> candidates;
+    for (std::size_t slot = 0; slot < slots; ++slot) {
+        const std::uint8_t value = range->state[slot].load(std::memory_order_acquire);
+        if (!(value & SlotLock) && ((value & SlotMask) == SlotOwn || (value & SlotMask) == SlotProbe))
+            candidates.emplace_back(range->physical[slot], slot);
+    }
+    if (guest_blocks_high.load(std::memory_order_relaxed)) std::sort(candidates.begin(), candidates.end());
+    constexpr std::size_t MostSlots = 256; // 512 MiB
+    std::size_t sent = 0;
+    for (const auto& candidate : candidates) {
+        if (sent >= MostSlots) break;
+        const std::size_t slot = candidate.second;
+        if (range->state[slot].load(std::memory_order_acquire) & SlotLock) continue;
+        LockSlot(*range, slot);
+        const std::uint8_t state = SlotState(*range, slot);
+        const bool out = (state == SlotOwn || state == SlotProbe) && SwapOut(*range, slot);
+        UnlockSlot(*range, slot, out ? SlotSwapped : state);
+        if (out && ++sent % 16 == 0 && PoolLargestFree() >= wanted) break;
+    }
+    counters.emergencies.fetch_add(1, std::memory_order_relaxed);
+    return sent * SparseSlot;
+#else
+    (void)wanted;
+    return 0;
+#endif
 }
 
 // What the guest's memory did so far, for EDEN_TIMELINE (headless/performance.cpp): slots written

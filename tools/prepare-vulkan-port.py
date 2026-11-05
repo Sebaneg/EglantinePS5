@@ -486,6 +486,19 @@ ALLOCATOR_REFUSED = """    VkResult created = CALL;
             std::fprintf(stderr, "EDEN_GRAPHICS_MEMORY budget refused %llu requests; asked again outside it: result %d, DETAIL\\n",
                          times, int(created), VALUES);
         }
+        // Refused outside the budget too: the guest's memory next to the graphics goes to the swap
+        // file at once (swap=on), the heap gives back its empty spaces, and it is asked for again,
+        // up to three times, before the session ends.
+        for (int attempt = 0; created != VK_SUCCESS && attempt < 3; ++attempt) {
+            const std::size_t freed =
+                eden_guest_memory_emergency ? eden_guest_memory_emergency(std::size_t{256} << 20) : 0;
+            const std::size_t trimmed = ::Eden::Performance::TrimHeap("a graphics allocation was refused");
+            if (freed == 0 && trimmed == 0) break;
+            created = AGAIN;
+            std::fprintf(stderr, "EDEN_GRAPHICS_MEMORY emergency %d: %zu MiB of the guest's memory to the swap file, "
+                         "%zu MiB of the heap given back; asked again: result %d\\n",
+                         attempt + 1, freed >> 20, trimmed >> 20, int(created));
+        }
         if (created != VK_SUCCESS) {
             VmaBudget held[VK_MAX_MEMORY_HEAPS]{};
             vmaGetHeapBudgets(allocator, held);
@@ -515,7 +528,7 @@ IMAGE_VALUES = 'ci.extent.width, ci.extent.height, ci.extent.depth, ci.arrayLaye
 BUFFER_VALUES = 'static_cast<unsigned long long>(ci.size), unsigned(ci.usage)'
 adapt('src/video_core/vulkan_common/vulkan_memory_allocator.cpp', 'vulkan_memory_allocator.cpp', [
     ('#include "video_core/vulkan_common/vulkan_memory_allocator.h"\n',
-     '#include "video_core/vulkan_common/vulkan_memory_allocator.h"\n#include <atomic>\n#include <cstddef>\n#include <cstdio>\n#include "capped_layers.h"\n#include "performance.h"\nnamespace Common { void GuestMemoryUsage(std::size_t* span, std::size_t* held) noexcept; }\nextern "C" std::size_t eden_heap_committed(void);\n'),
+     '#include "video_core/vulkan_common/vulkan_memory_allocator.h"\n#include <atomic>\n#include <cstddef>\n#include <cstdio>\n#include "capped_layers.h"\n#include "performance.h"\nnamespace Common { void GuestMemoryUsage(std::size_t* span, std::size_t* held) noexcept; }\nextern "C" std::size_t eden_heap_committed(void);\nextern "C" std::size_t eden_guest_memory_emergency(std::size_t wanted) noexcept __attribute__((weak));\n'),
     # What an image was that the allocator could not make at all, for stderr.log.
     ('    if (result != VK_SUCCESS) {\n        LOG_CRITICAL(Render_Vulkan, "Image {}x{}x{} ({} levels, {} layers, format {}) failed: {}",',
      """    if (result != VK_SUCCESS) {
