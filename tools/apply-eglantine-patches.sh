@@ -12,6 +12,17 @@ shopt -s nullglob
 patches=("$root"/tools/eglantine-patches/*.patch)
 ((${#patches[@]})) || exit 0
 [[ $mode == --revert ]] && mapfile -t patches < <(printf '%s\n' "${patches[@]}" | sort -r)
+# A patch that changes lines next to an earlier one's (0010 beside 0006 in vk_texture_cache.cpp)
+# leaves that earlier one no longer seen as applied once both are in, and a second run (make deps
+# runs this twice) took it for a patch that does not apply. The set applied last is remembered,
+# with the Eglantine commit it went on: the same set on the same commit is left alone.
+stamp="$(git -C Eglantine rev-parse --absolute-git-dir)/eglantine-patches.applied"
+set_id=$( { git -C Eglantine rev-parse HEAD; cat "${patches[@]}"; } | sha256sum | cut -d' ' -f1)
+if [[ $mode == --revert ]]; then
+    rm -f "$stamp"
+elif [[ -f $stamp && $(cat "$stamp") == "$set_id" ]]; then
+    exit 0
+fi
 for patch in "${patches[@]}"; do
     name=$(basename "$patch")
     if git -C Eglantine apply --reverse --check "$patch" >/dev/null 2>&1; then
@@ -29,3 +40,4 @@ for patch in "${patches[@]}"; do
         exit 1
     fi
 done
+[[ $mode == --revert ]] || echo "$set_id" > "$stamp"
