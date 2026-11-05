@@ -34,6 +34,11 @@ extern "C" int sceKernelEnableDmemAliasing() { enabled=true; return 0; }
 // The same source file also holds the heap's growing range and the sparse tables; this check
 // does not use them (tools/check-heap-growth.py and eden-memory-check do).
 extern "C" int sceKernelDebugOutText(int, const char*) { return 0; }
+// The guest memory's swapper asks how large the pool's largest free block is: plenty, here.
+extern "C" int sceKernelAvailableDirectMemorySize(std::int64_t, std::int64_t, size_t, std::int64_t* start,
+                                                  size_t* size) {
+    *start = 0; *size = std::size_t{1} << 40; return 0;
+}
 extern "C" int sceKernelReserveVirtualRange(void** out, size_t size, int, size_t) {
     if (!reserve_ok) return std::int32_t(0x80020001u);
     void* at=mmap(reinterpret_cast<void*>(reserve_at),size,PROT_NONE,
