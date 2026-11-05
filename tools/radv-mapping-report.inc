@@ -15,7 +15,8 @@ struct radv_ps5_query_info {
    uint8_t padding[7];
 };
 _Static_assert(sizeof(struct radv_ps5_query_info) == 72, "libkernel query record");
-int sceKernelVirtualQuery(const void *address, int flags, void *info, size_t size) __attribute__((weak));
+/* libkernel's; not weak: headless/check_package.py refuses an unresolved weak import. */
+int sceKernelVirtualQuery(const void *address, int flags, void *info, size_t size);
 
 static void
 radv_ps5_report_space(void)
@@ -38,29 +39,26 @@ radv_ps5_report_space(void)
    simple_mtx_unlock(&radv_ps5_region.lock);
    uint32_t mappings = 0, direct = 0, flexible = 0;
    uint64_t mapped = 0, direct_bytes = 0;
-   if (sceKernelVirtualQuery) {
-      struct radv_ps5_query_info info;
-      const void *at = NULL;
-      while (mappings < 1000000) {
-         memset(&info, 0, sizeof(info));
-         if (sceKernelVirtualQuery(at, 1 /* the next mapping from `at` */, &info, sizeof(info)) != 0 ||
-             info.end <= (uint64_t)(uintptr_t)at)
-            break;
-         mappings++;
-         mapped += info.end - info.start;
-         if (info.flags & 2) {
-            direct++;
-            direct_bytes += info.end - info.start;
-         }
-         if (info.flags & 1)
-            flexible++;
-         at = (const void *)(uintptr_t)info.end;
+   struct radv_ps5_query_info info;
+   const void *at = NULL;
+   while (mappings < 1000000) {
+      memset(&info, 0, sizeof(info));
+      if (sceKernelVirtualQuery(at, 1 /* the next mapping from `at` */, &info, sizeof(info)) != 0 ||
+          info.end <= (uint64_t)(uintptr_t)at)
+         break;
+      mappings++;
+      mapped += info.end - info.start;
+      if (info.flags & 2) {
+         direct++;
+         direct_bytes += info.end - info.start;
       }
+      if (info.flags & 1)
+         flexible++;
+      at = (const void *)(uintptr_t)info.end;
    }
    fprintf(stderr,
            "radv/ps5: device region %u of %u 2 MiB granules free (longest run %u); the process holds %u "
-           "mappings (%llu MiB), %u of direct memory (%llu MiB), %u flexible%s\n",
+           "mappings (%llu MiB), %u of direct memory (%llu MiB), %u flexible\n",
            free_granules, granules, longest, mappings, (unsigned long long)(mapped >> 20), direct,
-           (unsigned long long)(direct_bytes >> 20), flexible,
-           sceKernelVirtualQuery ? "" : " (no virtual query: mappings not counted)");
+           (unsigned long long)(direct_bytes >> 20), flexible);
 }
