@@ -3,8 +3,8 @@
  * Memory. PS5 direct memory is real from the first byte, and the CPU shares one 12 GiB pool with
  * the GPU. The heap used to take its whole 3 GiB at start; the largest game measured used
  * 1.16 GiB of it, and the rest was graphics memory that game then ran out of. So the heap now
- * reserves its range (6 GiB, PS5_OPENGL_HEAP_SIZE) as address space only and commits it a piece
- * (128 MiB) at a time, from the start of the range, when an allocation finds no room. Where no
+ * reserves its range (6 GiB, PS5_OPENGL_HEAP_SIZE) as address space only and commits it 128 MiB
+ * (four 32 MiB pieces) at a time, from the start of the range, when an allocation finds no room. Where no
  * range can be reserved, it takes 3 GiB at once, as it did before it grew. Every piece (or run of pieces, for one
  * request larger than a piece) is a Sony mspace of its own; an address tells its piece, and
  * the piece its mspace. Memory is not given back: a piece stays for the next game.
@@ -80,10 +80,22 @@
 #define EDEN_HEAP_ARENA_RETRY 256u
 /* Larger requests (and all over-aligned ones) always use the heap's own spaces. */
 #define EDEN_HEAP_SMALL_REQUEST (256u * 1024u)
-/* The heap grows by pieces of this size. */
-#define EDEN_HEAP_PIECE_SHIFT 27u /* 128 MiB */
+/* The heap's range is kept in pieces of this size. */
+#define EDEN_HEAP_PIECE_SHIFT 25u /* 32 MiB */
 #define EDEN_HEAP_PIECE_SIZE ((size_t)1 << EDEN_HEAP_PIECE_SHIFT)
 #define EDEN_HEAP_PIECES (PS5_OPENGL_HEAP_SIZE >> EDEN_HEAP_PIECE_SHIFT)
+/* A growth takes this many pieces at least (128 MiB), and the first space is that size. Only a
+ * space with no block in it goes back to the console, and a large space seldom empties: Mario
+ * Kart World held 2.7 GB of spaces with 1.4 GB in use. The lab file can make growths smaller
+ * (eden_heap_set_grow_pieces), down to one piece, so that more of them empty and go back. */
+#define EDEN_HEAP_GROW_PIECES_DEFAULT 4u
+static atomic_uint eden_heap_grow_pieces = EDEN_HEAP_GROW_PIECES_DEFAULT;
+/* 0 restores the default; anything else is kept between 1 and the default. */
+void eden_heap_set_grow_pieces(unsigned pieces) {
+  if (pieces == 0 || pieces > EDEN_HEAP_GROW_PIECES_DEFAULT)
+    pieces = EDEN_HEAP_GROW_PIECES_DEFAULT;
+  atomic_store_explicit(&eden_heap_grow_pieces, pieces, memory_order_relaxed);
+}
 
 void *eden_heap_reserve(size_t size);             /* address space only; NULL when refused */
 int eden_heap_commit(void *address, size_t size); /* zeroed memory for a part of it; 0 when done */
@@ -395,9 +407,9 @@ static int ps5_heap_ready(void) {
   /* Address space for the whole heap and memory for its first piece; where a range cannot be
    * reserved, 3 GiB at once as before. */
   void *base = eden_heap_reserve(PS5_OPENGL_HEAP_SIZE);
-  size_t first_size = EDEN_HEAP_PIECE_SIZE;
-  unsigned first_pieces = 1;
-  if (base != NULL && eden_heap_commit(base, EDEN_HEAP_PIECE_SIZE) == 0) {
+  size_t first_size = (size_t)EDEN_HEAP_GROW_PIECES_DEFAULT << EDEN_HEAP_PIECE_SHIFT;
+  unsigned first_pieces = EDEN_HEAP_GROW_PIECES_DEFAULT;
+  if (base != NULL && eden_heap_commit(base, first_size) == 0) {
     eden_heap_grows = 1;
   } else {
     base = eden_heap_pages(EDEN_HEAP_WHOLE_SIZE);
@@ -572,7 +584,10 @@ static int eden_heap_grow(size_t bytes, unsigned seen) {
   const unsigned used = atomic_load_explicit(&eden_heap_pieces_used, memory_order_relaxed);
   /* Room for the request and for the mspace's own records. */
   const size_t need = bytes + ((size_t)1 << 20);
-  const size_t pieces = (need + EDEN_HEAP_PIECE_SIZE - 1) >> EDEN_HEAP_PIECE_SHIFT;
+  size_t pieces = (need + EDEN_HEAP_PIECE_SIZE - 1) >> EDEN_HEAP_PIECE_SHIFT;
+  const unsigned step = atomic_load_explicit(&eden_heap_grow_pieces, memory_order_relaxed);
+  if (pieces < step)
+    pieces = step;
   /* Pieces given back, `pieces` of them in a row, else the next ones. */
   unsigned first = used;
   if (eden_heap_grows && need > bytes) {

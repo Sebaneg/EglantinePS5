@@ -241,6 +241,7 @@ void eden_heap_spill_stats(unsigned long long *, unsigned long long *, unsigned 
 size_t eden_heap_trim(void);
 void eden_heap_usage(size_t *held, size_t *in_use, size_t *returned);
 void eden_heap_set_large_request(size_t bytes);
+void eden_heap_set_grow_pieces(unsigned pieces);
 
 static void fill(unsigned char *block, size_t size, unsigned seed) {
     // The start and the end of a large block are enough to see another owner writing into it.
@@ -533,6 +534,33 @@ int main(int argc, char **argv) {
         assert(default_size != NULL && eden_heap_large_held(&blocks_alive) == 0 && blocks_alive == 0);
         __wrap_free(default_size);
         printf("heap_bloque_propio=4: %d blocks of 4-11 MiB with memory of their own, all given back\n", MIDDLE);
+        // The lab file's heap_trozo=32: the heap grows by one 32 MiB piece, not by 128 MiB; the
+        // spaces that empty go back, and 0 brings back growths of 128 MiB.
+        for (unsigned step = 1; step <= 4; step += 3) {
+            eden_heap_set_grow_pieces(step == 4 ? 0 : step);
+            enum { GROWN = 64 };
+            static unsigned char *grown_blocks[GROWN];
+            size_t growth = 0;
+            int taken = 0;
+            while (taken < GROWN && growth == 0) {
+                const size_t before_block = eden_heap_committed();
+                grown_blocks[taken] = __wrap_malloc((size_t)20 << 20);
+                assert(grown_blocks[taken] != NULL);
+                fill(grown_blocks[taken], (size_t)20 << 20, 40 + taken);
+                growth = eden_heap_committed() - before_block;
+                ++taken;
+            }
+            if (growth != ((size_t)step << 25)) {
+                fprintf(stderr, "growth of %u pieces: %zu MiB\n", step, growth >> 20);
+                abort();
+            }
+            for (int i = 0; i < taken; ++i) {
+                verify(grown_blocks[i], (size_t)20 << 20, 40 + i);
+                __wrap_free(grown_blocks[i]);
+            }
+            assert(eden_heap_trim() >= growth);
+        }
+        printf("heap_trozo=32: the heap grew by 32 MiB, and by 128 MiB again with the default\n");
     }
     // Fill the heap with blocks under the large size: the limit is its 6 GiB (3 GiB taken whole),
     // past the old 3 GiB, and running out returns NULL without damage.

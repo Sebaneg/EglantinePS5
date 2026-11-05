@@ -1,7 +1,8 @@
 diff --git a/src/core/hle/service/nx2_gsv.h b/src/core/hle/service/nx2_gsv.h
+index 2790fed..6297e45 100644
 --- a/src/core/hle/service/nx2_gsv.h
 +++ b/src/core/hle/service/nx2_gsv.h
-@@ -1060,6 +1060,21 @@ private:
+@@ -1060,6 +1060,32 @@ private:
          return lazy;
      }
  
@@ -18,12 +19,23 @@ diff --git a/src/core/hle/service/nx2_gsv.h b/src/core/hle/service/nx2_gsv.h
 +        }();
 +        return on;
 +    }
-+    static constexpr u64 GpuOnlyTilePoolSize = 1ULL << 30;
++    // EDEN_NX2_GPU_ONLY_TILES_MIB=N: the smallest region that takes them (MiB, 1024 without it).
++    // Title 1 also has a 341 MiB GPU-only pool whose whole-image upload needed a 352 MiB staging
++    // buffer as the race loaded; 300 takes it and still leaves out the 285 MB render targets.
++    // Values under 286 are not taken, so render targets never are.
++    static u64 GpuOnlyTilePoolSize() {
++        static const u64 size = [] {
++            const char* value = std::getenv("EDEN_NX2_GPU_ONLY_TILES_MIB");
++            const u64 mib = value != nullptr ? std::strtoull(value, nullptr, 10) : 0;
++            return (mib >= 286 ? mib : 1024ULL) << 20;
++        }();
++        return size;
++    }
 +
      // EDEN_NX2_GPU_ONLY_LAZY=0 backs GPU-only regions whole, as before.
      static bool LazyGpuOnlyRegions() {
          static const bool lazy = [] {
-@@ -1078,6 +1093,7 @@ private:
+@@ -1078,6 +1104,7 @@ private:
      static constexpr u8 BlockWritten = 4; ///< Written in a region the game maps tiles into
      struct SparseRegion {
          bool gpu_only{};        ///< A GPU-only region (no sparse flag), backed lazily as well
@@ -31,7 +43,7 @@ diff --git a/src/core/hle/service/nx2_gsv.h b/src/core/hle/service/nx2_gsv.h
          u64 size;
          std::vector<u8> blocks; ///< BlockEmpty / Backed / Failed / Pending / Written per block
          bool warned{};          ///< Logged that the pool ran out for its blocks
-@@ -1085,6 +1101,28 @@ private:
+@@ -1085,6 +1112,28 @@ private:
          std::vector<bool> tile_pages; ///< Pages a tile maps, once `tiles`
      };
      std::map<u64, SparseRegion> m_sparse_regions; ///< By GPU address
@@ -40,7 +52,7 @@ diff --git a/src/core/hle/service/nx2_gsv.h b/src/core/hle/service/nx2_gsv.h
 +    // texture cache learns it as a sparse region (with the blocks written so far), so that images
 +    // over it read the tiles and get sparse storage.
 +    bool TakesGpuOnlyTiles(u64 start, SparseRegion& region) {
-+        if (!region.gpu_only || !GpuOnlyTiles() || region.size < GpuOnlyTilePoolSize) {
++        if (!region.gpu_only || !GpuOnlyTiles() || region.size < GpuOnlyTilePoolSize()) {
 +            return false;
 +        }
 +        if (!region.tile_pool) {
@@ -60,7 +72,7 @@ diff --git a/src/core/hle/service/nx2_gsv.h b/src/core/hle/service/nx2_gsv.h
      u64 m_sparse_blocks{};       ///< Sparse blocks backed so far
      u64 m_sparse_backed_bytes{}; ///< Sparse region memory given out so far
      u64 m_sparse_zero_bytes{};   ///< Zeros written over unwritten sparse blocks, left out
-@@ -1138,8 +1176,11 @@ private:
+@@ -1138,8 +1187,11 @@ private:
              }
          }
          if (const auto gpu_only = GpuOnlyRegionOf(gpu_address, size)) {
