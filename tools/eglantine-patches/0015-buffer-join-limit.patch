@@ -1,0 +1,58 @@
+diff --git a/src/video_core/buffer_cache/buffer_cache.h b/src/video_core/buffer_cache/buffer_cache.h
+index 2716abf..e0f4c72 100644
+--- a/src/video_core/buffer_cache/buffer_cache.h
++++ b/src/video_core/buffer_cache/buffer_cache.h
+@@ -9,6 +9,7 @@
+ #include "video_core/buffer_cache/uniform_cache_history.h"
+ 
+ #include <algorithm>
++#include <cstdlib>
+ #include <memory>
+ #include <numeric>
+ #include <stdexcept>
+@@ -2125,7 +2126,44 @@ BufferId BufferCache<P>::CreateBuffer(DAddr device_addr, u32 wanted_size,
+     DAddr device_addr_end = Common::AlignUp(device_addr + wanted_size, CACHING_PAGESIZE);
+     device_addr = Common::AlignDown(device_addr, CACHING_PAGESIZE);
+     wanted_size = static_cast<u32>(device_addr_end - device_addr);
+-    const OverlapResult overlap = ResolveOverlaps(device_addr, wanted_size);
++    OverlapResult overlap = ResolveOverlaps(device_addr, wanted_size);
++    // EglantinePS5: a join larger than EDEN_BUFFER_JOIN_MAX_MIB (256; 0: no limit) is not made.
++    // Joined buffers only grow: Mario Kart World's race joined its index and vertex data into
++    // one buffer of 478 MiB, then 908 MiB on another lap, which needs a free block that size in
++    // a console pool shared with the guest, and the session ended with the allocation refused.
++    // The overlapping buffers go instead, their GPU-written data downloaded to guest memory
++    // first (as the collector evicts), and the new buffer covers only what was asked for.
++    static const u64 join_max = [] {
++        const char* value = std::getenv("EDEN_BUFFER_JOIN_MAX_MIB");
++        return (value != nullptr ? std::strtoull(value, nullptr, 10) : 256ULL) << 20;
++    }();
++    if (join_max != 0 && !overlap.ids.empty() && overlap.end - overlap.begin > join_max &&
++        overlap.end - overlap.begin > u64{wanted_size}) {
++        static u32 logged{};
++        if (logged++ < 16) {
++            LOG_WARNING(HW_GPU, "Buffer join of {} MiB over the limit: {} buffers evicted instead, "
++                        "a buffer of {} KiB made",
++                        (overlap.end - overlap.begin) >> 20, overlap.ids.size(), wanted_size >> 10);
++        }
++        const boost::container::small_vector<BufferId, 16> evicted(overlap.ids.begin(),
++                                                                   overlap.ids.end());
++        if constexpr (USE_MEMORY_MAPS) {
++            DownloadBuffersMemory(evicted);
++        } else {
++            for (const BufferId buffer_id : evicted) {
++                DownloadBufferMemory(slot_buffers[buffer_id]);
++            }
++        }
++        for (const BufferId buffer_id : evicted) {
++            DeleteBuffer(buffer_id);
++        }
++        overlap = OverlapResult{
++            .ids = {},
++            .begin = device_addr,
++            .end = device_addr + wanted_size,
++            .has_stream_leap = false,
++        };
++    }
+     const u32 size = static_cast<u32>(overlap.end - overlap.begin);
+     const BufferId new_buffer_id =
+         slot_buffers.insert(runtime, overlap.begin, size, sparse_compatible);

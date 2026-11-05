@@ -325,6 +325,15 @@ inline bool ApplyEarly(const std::string& entry, bool& block_list_set) {
     // swap_intermedio=off: the swap file is written and read straight from the guest's slots, without the
     // bounce buffers (src/guest_memory_service.inc). Read as the game starts.
     else if (entry == "swap_intermedio=off") SetVariable("EDEN_SWAP_BOUNCE", "0");
+    // atajos_bufer=off: the buffer cache checks every page of every bound range again at each draw,
+    // as before Eglantine patch 0016 (from viejunerd/Eglantine-PS5-, their 0017). Read once.
+    else if (entry == "atajos_bufer=off") SetVariable("EDEN_NX2_DRAW_TUNING", "0");
+    // gpu_dos_hilos=off: the GPU thread stays one thread even with gpu_accuracy=low (EDEN_NX2_SPLIT=0).
+    else if (entry == "gpu_dos_hilos=off") SetVariable("EDEN_NX2_SPLIT", "0");
+    // bufer_max=N: the largest buffer the buffer cache makes by joining overlapping ones (MiB, 0 to
+    // 4096; 256 without the line, 0: no limit, as before). Eglantine patch 0015; read once per app start.
+    else if (entry.starts_with("bufer_max=") && Number(entry, 10, n) && n <= 4096)
+        SetVariable("EDEN_BUFFER_JOIN_MAX_MIB", entry.c_str() + 10);
     else if (entry.starts_with("swap_caliente=") && Number(entry, 14, n) && n <= 3600)
         SetVariable("EDEN_SWAP_HOT_SECONDS", entry.c_str() + 14);
     else if (entry.starts_with("reserva_juego=") && Number(entry, 14, n))

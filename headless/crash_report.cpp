@@ -595,8 +595,8 @@ void FreezeWatch() {
 // and the app's code addresses on its stack, as the crash report lists them) into hitch_line, and
 // the watch prints one EDEN_HITCH line per thread. Up to 4 rounds per stall (at N, 2N, 3N, 4N ms)
 // and 480 lines per game. tools/symbolize-crash.py reads the eboot+0x addresses.
-constexpr const char* kHitchThreads[] = {"GPU",       "VulkanWorker", "GPUFencingThread", "VulkanPresent",
-                                         "CPUCore_0", "CPUCore_1",    "CPUCore_2",        "CPUCore_3"};
+constexpr const char* kHitchThreads[] = {"GPU",       "GPUBack",   "VulkanWorker", "GPUFencingThread",
+                                         "VulkanPresent", "CPUCore_0", "CPUCore_1", "CPUCore_2", "CPUCore_3"};
 unsigned long long MonotonicMs() noexcept {
     timespec now{};
     clock_gettime(CLOCK_MONOTONIC, &now);
