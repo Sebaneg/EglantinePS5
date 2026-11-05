@@ -1,0 +1,35 @@
+diff --git a/src/video_core/texture_cache/texture_cache.h b/src/video_core/texture_cache/texture_cache.h
+index 419039c..f7e9ad4 100644
+--- a/src/video_core/texture_cache/texture_cache.h
++++ b/src/video_core/texture_cache/texture_cache.h
+@@ -2002,6 +2002,30 @@ std::vector<u32> TextureCache<P>::BindSparseLayers(Image& image, std::span<const
+ template <class P>
+ void TextureCache<P>::UploadLayers(Image& image, std::span<const u32> layers) {
+     if constexpr (requires { &Runtime::AccelerateImageUploadLayers; }) {
++        // Many layers at once took one staging buffer for all of them: title 1 asked for 352 MiB
++        // as a race loaded, with 334 MiB in the pool's largest free block, and the session ended.
++        // Layers now go in groups of at most 64 MiB, each group's staging free for the next.
++        constexpr size_t group_bytes = 64_MiB;
++        size_t layer_bytes = 0;
++        if (False(image.flags & ImageFlagBits::AcceleratedUpload)) {
++            ImageInfo layer_info = image.info;
++            layer_info.resources.layers = 1;
++            layer_bytes = CalculateUnswizzledSizeBytes(layer_info);
++        } else {
++            const auto uploads = FullUploadSwizzles(image.info);
++            layer_bytes = image.info.layer_stride - uploads[image.host_level_offset].buffer_offset;
++        }
++        if (layers.size() > 1 && layer_bytes * layers.size() > group_bytes) {
++            const size_t per_group = (std::max<size_t>)(1, group_bytes / (std::max<size_t>)(1, layer_bytes));
++            for (size_t first = 0; first < layers.size(); first += per_group) {
++                if (first != 0) {
++                    // Submit and wait so the last group's staging memory can be used again.
++                    runtime.Finish();
++                }
++                UploadLayers(image, layers.subspan(first, (std::min)(per_group, layers.size() - first)));
++            }
++            return;
++        }
+         if (False(image.flags & ImageFlagBits::AcceleratedUpload)) {
+             // Plain formats: each layer unswizzled on its own into its layer of the image.
+             ImageInfo layer_info = image.info;

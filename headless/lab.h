@@ -246,6 +246,13 @@ inline bool ApplyEarly(const std::string& entry, bool& block_list_set) {
     else if (entry.starts_with("heap_trozo=") && Number(entry, 11, n) && n >= 32 && n <= 128 && n % 32 == 0 &&
              eden_heap_set_grow_pieces)
         eden_heap_set_grow_pieces(static_cast<unsigned>(n / 32));
+    // Each guest thread's stack (KiB, 256 to 2048; 2048 without this line), read as the game makes
+    // its threads (Eglantine patch 0008).
+    else if (entry.starts_with("pila_hilos=") && Number(entry, 11, n) && n >= 256 && n <= 2048)
+        SetVariable("EDEN_FIBER_STACK_KIB", entry.c_str() + 11);
+    // The code cache of guest cores 3-5 (MiB, 16 to 128 in steps of 16; 16 without this line).
+    else if (entry.starts_with("jit_nucleos=") && Number(entry, 12, n) && n >= 16 && n <= 128 && n % 16 == 0)
+        SetVariable("EDEN_JIT_CORE_MIB", entry.c_str() + 12);
     else if (entry == "fastmem=on" || entry == "fastmem=off") Fastmem::Request(entry.ends_with("on"));
     else if (entry == "jit_list=on" || entry == "jit_list=off") {
         JitList::enabled = entry.ends_with("on");

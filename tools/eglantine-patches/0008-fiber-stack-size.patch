@@ -1,0 +1,47 @@
+diff --git a/src/common/fiber.cpp b/src/common/fiber.cpp
+index 613ac97..ec79241 100644
+--- a/src/common/fiber.cpp
++++ b/src/common/fiber.cpp
+@@ -5,6 +5,7 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
+ #include <thread>
++#include <cstdlib>
+ #include <mutex>
+ 
+ #include "common/assert.h"
+@@ -21,6 +22,19 @@ constexpr size_t DEFAULT_STACK_SIZE = 512 * 4096;
+ #endif
+ constexpr u32 CANARY_VALUE = 0xDEADBEEF;
+ 
++// EDEN_FIBER_STACK_KIB=N (256 to 2048): each fiber's stack. Heap memory is real from the first
++// byte on the PS5, and title 1's 151 guest threads held 302 MiB of 2 MiB stacks, spread over the
++// heap's spaces so that none of them emptied and went back. Read for each fiber: a lab line
++// applies from the next game.
++static size_t FiberStackSize() {
++    const char* value = std::getenv("EDEN_FIBER_STACK_KIB");
++    const unsigned long kib = value != nullptr ? std::strtoul(value, nullptr, 10) : 0;
++    if (kib < 256 || kib > 2048) {
++        return DEFAULT_STACK_SIZE;
++    }
++    return static_cast<size_t>(kib) * 1024;
++}
++
+ struct Fiber::FiberImpl {
+     FiberImpl() {}
+ 
+@@ -50,10 +64,11 @@ void Fiber::SetRewindPoint(std::function<void()>&& rewind_func) {
+ 
+ Fiber::Fiber(std::function<void()>&& entry_point_func) : impl{std::make_unique<FiberImpl>()} {
+     impl->entry_point = std::move(entry_point_func);
+-    impl->stack.reset(new u8[DEFAULT_STACK_SIZE]);
++    const size_t stack_size = FiberStackSize();
++    impl->stack.reset(new u8[stack_size]);
+     impl->stack_limit = impl->stack.get();
+-    u8* stack_base = impl->stack_limit + DEFAULT_STACK_SIZE;
+-    impl->context = boost::context::detail::make_fcontext(stack_base, DEFAULT_STACK_SIZE, [](boost::context::detail::transfer_t transfer) -> void {
++    u8* stack_base = impl->stack_limit + stack_size;
++    impl->context = boost::context::detail::make_fcontext(stack_base, stack_size, [](boost::context::detail::transfer_t transfer) -> void {
+         auto* fiber = static_cast<Fiber*>(transfer.data);
+         ASSERT(fiber && fiber->impl && fiber->impl->previous_fiber && fiber->impl->previous_fiber->impl);
+         ASSERT(fiber->impl->canary_1 == CANARY_VALUE);

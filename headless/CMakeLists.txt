@@ -689,7 +689,11 @@ foreach(bits 32 64)
       # Only the active architecture allocates these caches; core3/host stay 16 MiB.
       if(PS5_NATIVE)
           if(bits EQUAL 64)
-              set(jit_cache_sizes "m_core_index == 0 ? 256_MiB : m_core_index < 3 ? 192_MiB : 16_MiB")
+              # Switch 2 titles run game threads on cores 3-5 too (title 1 filled their 16 MiB about 50
+              # times each, every fill a clear and a stall of seconds). EDEN_JIT_CORE_MIB=N (16 to 128,
+              # in 16 MiB steps; lab file jit_nucleos=N) makes their caches that large; past 16 MiB they
+              # take memory in 16 MiB steps as they fill (src/memory_pages.cpp ReserveCodeRange).
+              set(jit_cache_sizes "m_core_index == 0 ? 256_MiB : m_core_index < 3 ? 192_MiB : [] { const char* value = std::getenv(\"EDEN_JIT_CORE_MIB\"); const unsigned long mib = value != nullptr ? std::strtoul(value, nullptr, 10) : 16; return (mib >= 16 && mib <= 128 && mib % 16 == 0 ? mib : 16ul) << 20; }()")
           else()
               set(jit_cache_sizes "m_core_index == 0 ? 512_MiB : m_core_index < 3 ? 64_MiB : 16_MiB")
           endif()
