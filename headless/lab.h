@@ -25,6 +25,8 @@ extern "C" bool eden_jit_shared;  // headless/dynarmic/jit_group_support.inc
 extern "C" void eden_heap_set_large_request(std::size_t bytes) __attribute__((weak));
 // How many 32 MiB pieces a growth of the heap takes at least (headless/heap_arenas.inc); 0: default.
 extern "C" void eden_heap_set_grow_pieces(unsigned pieces) __attribute__((weak));
+// The most arenas the heap makes for threads' small blocks (headless/heap_arenas.inc); 0: default.
+extern "C" void eden_heap_set_arena_limit(unsigned limit) __attribute__((weak));
 
 // The guest's memory service (src/guest_memory_service.inc), read by its scanner as it runs.
 namespace Common {
@@ -121,6 +123,7 @@ inline void Restore() {
     Common::SetGuestMemoryFine(false);
     if (eden_heap_set_large_request) eden_heap_set_large_request(0);
     if (eden_heap_set_grow_pieces) eden_heap_set_grow_pieces(0);
+    if (eden_heap_set_arena_limit) eden_heap_set_arena_limit(0);
     // Task/mesh draws hang the GPU under RADV (Mario Kart World on the console, and on desktop
     // AMD GPUs: Djihads80/Eglantine#404), so they are skipped unless the lab file says mesh=on.
     // Eglantine reads this once, at the first draw of the app's run.
@@ -170,6 +173,10 @@ inline bool ApplyEarly(const std::string& entry, bool& block_list_set) {
     // (Eglantine patch 0005), instead of blocks of their own; read once per app start.
     else if (entry == "zonas_gpu_trozos=on") SetVariable("EDEN_NX2_GPU_ONLY_TILES", "1");
     // The smallest zone zonas_gpu_trozos takes (MiB, 286 to 1024; 1024 without this line).
+    // The most device memory one layered terrain texture binds (MiB, 128 to 768; read once per app
+    // start, Eglantine patch 0009).
+    else if (entry.starts_with("capas_max=") && Number(entry, 10, n) && n >= 128 && n <= 768)
+        SetVariable("EDEN_NX2_LAYERS_CAP_MIB", entry.c_str() + 10);
     else if (entry.starts_with("zonas_gpu_minimo=") && Number(entry, 17, n) && n >= 286 && n <= 1024)
         SetVariable("EDEN_NX2_GPU_ONLY_TILES_MIB", entry.c_str() + 17);
     else if (entry == "sparse=off") DevVulkan::disable_sparse = true;
@@ -248,6 +255,11 @@ inline bool ApplyEarly(const std::string& entry, bool& block_list_set) {
         eden_heap_set_grow_pieces(static_cast<unsigned>(n / 32));
     // Each guest thread's stack (KiB, 256 to 2048; 2048 without this line), read as the game makes
     // its threads (Eglantine patch 0008).
+    // The most arenas (8 MiB each, kept for good) the heap makes for threads' small blocks (8 to
+    // 256; 256 without this line). Past it, threads share the arenas there are.
+    else if (entry.starts_with("heap_arenas=") && Number(entry, 12, n) && n >= 8 && n <= 256 &&
+             eden_heap_set_arena_limit)
+        eden_heap_set_arena_limit(static_cast<unsigned>(n));
     else if (entry.starts_with("pila_hilos=") && Number(entry, 11, n) && n >= 256 && n <= 2048)
         SetVariable("EDEN_FIBER_STACK_KIB", entry.c_str() + 11);
     // The code cache of guest cores 3-5 (MiB, 16 to 128 in steps of 16; 16 without this line).

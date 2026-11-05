@@ -1,0 +1,21 @@
+diff --git a/src/video_core/renderer_vulkan/vk_texture_cache.cpp b/src/video_core/renderer_vulkan/vk_texture_cache.cpp
+--- a/src/video_core/renderer_vulkan/vk_texture_cache.cpp
++++ b/src/video_core/renderer_vulkan/vk_texture_cache.cpp
+@@ -284,7 +284,17 @@
+ 
+ // The most device memory one SparseLayers image binds: 768 MiB, 384 MiB on GPUs with less than
+ // 7 GiB (title 1's BC6H arrays are 85 MB a layer).
++// EDEN_NX2_LAYERS_CAP_MIB=N (128 to 768) sets it: title 1's terrain array (85 MiB a layer) may
++// take nine layers at 768 MiB while the pool the CPU shares with the GPU runs out.
+ [[nodiscard]] VkDeviceSize SparseLayersCap(const Device& device) {
++    static const VkDeviceSize chosen = [] {
++        const char* value = std::getenv("EDEN_NX2_LAYERS_CAP_MIB");
++        const unsigned long mib = value != nullptr ? std::strtoul(value, nullptr, 10) : 0;
++        return mib >= 128 && mib <= 768 ? VkDeviceSize{mib} << 20 : VkDeviceSize{0};
++    }();
++    if (chosen != 0) {
++        return chosen;
++    }
+     return device.GetDeviceLocalMemory() < (u64{7} << 30) ? (VkDeviceSize{384} << 20)
+                                                            : (VkDeviceSize{768} << 20);
+ }

@@ -242,6 +242,8 @@ size_t eden_heap_trim(void);
 void eden_heap_usage(size_t *held, size_t *in_use, size_t *returned);
 void eden_heap_set_large_request(size_t bytes);
 void eden_heap_set_grow_pieces(unsigned pieces);
+void eden_heap_set_arena_limit(unsigned limit);
+void eden_heap_detail(unsigned *arenas, size_t *arena_bytes, size_t *space_blocks, size_t *space_free);
 
 static void fill(unsigned char *block, size_t size, unsigned seed) {
     // The start and the end of a large block are enough to see another owner writing into it.
@@ -561,6 +563,46 @@ int main(int argc, char **argv) {
             assert(eden_heap_trim() >= growth);
         }
         printf("heap_trozo=32: the heap grew by 32 MiB, and by 128 MiB again with the default\n");
+        // The report's detail: a block of the spaces counts in "other blocks" while it lives, a
+        // resize in place moves the count with it, and the arenas count 8 MiB each.
+        {
+            unsigned arenas = 0;
+            size_t arena_bytes = 0, space_blocks = 0, space_free = 0;
+            eden_heap_detail(&arenas, &arena_bytes, &space_blocks, &space_free);
+            assert(arenas == eden_heap_arenas_created() && arena_bytes == (size_t)arenas << 23);
+            const size_t blocks_before = space_blocks;
+            unsigned char *spaced = __wrap_malloc((size_t)1 << 20);   // 1 MiB: from the spaces
+            assert(spaced != NULL);
+            fill(spaced, (size_t)1 << 20, 61);
+            eden_heap_detail(NULL, NULL, &space_blocks, NULL);
+            if (space_blocks < blocks_before + ((size_t)1 << 20)) {
+                fprintf(stderr, "detail: other blocks %zu -> %zu with a 1 MiB block\n", blocks_before, space_blocks);
+                abort();
+            }
+            unsigned char *bigger = __wrap_realloc(spaced, (size_t)3 << 20);
+            assert(bigger != NULL);
+            verify(bigger, (size_t)1 << 20, 61);
+            eden_heap_detail(NULL, NULL, &space_blocks, NULL);
+            assert(space_blocks >= blocks_before + ((size_t)3 << 20));
+            __wrap_free(bigger);
+            eden_heap_detail(NULL, NULL, &space_blocks, &space_free);
+            if (space_blocks != blocks_before) {
+                fprintf(stderr, "detail: other blocks %zu after the free, %zu before\n", space_blocks, blocks_before);
+                abort();
+            }
+            assert(space_free <= eden_heap_committed());
+        }
+        // heap_arenas=8: no arena past the limit; a thread that finds none of its own shares one.
+        {
+            eden_heap_set_arena_limit(8);
+            const unsigned arenas_before_limit = eden_heap_arenas_created();
+            static unsigned char *limited[1][KEPT];
+            keep_and_free(1, limited);
+            assert(eden_heap_arenas_created() == arenas_before_limit);
+            eden_heap_set_arena_limit(0);
+            printf("heap detail and heap_arenas=8: other blocks followed through malloc, realloc and free; "
+                   "no arena past the limit (%u made)\n", arenas_before_limit);
+        }
     }
     // Fill the heap with blocks under the large size: the limit is its 6 GiB (3 GiB taken whole),
     // past the old 3 GiB, and running out returns NULL without damage.

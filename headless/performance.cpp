@@ -38,6 +38,8 @@ namespace Common {
 void GuestMemoryUsage(std::size_t* span, std::size_t* held) noexcept;
 // Address space Eden's sparse tables span and the memory they hold (src/memory_pages.cpp).
 void SparseUsage(std::size_t* reserved, std::size_t* committed) noexcept;
+// Address space the growing JIT code caches span and the memory behind them (src/memory_pages.cpp).
+void CodeRangeUsage(std::size_t* reserved, std::size_t* committed) noexcept;
 } // namespace Common
 
 namespace Eden::Performance {
@@ -344,6 +346,8 @@ extern "C" std::size_t eden_heap_large_held(unsigned* blocks) __attribute__((wea
 extern "C" std::size_t eden_heap_trim(void) __attribute__((weak));
 extern "C" void eden_heap_sites_report(void) __attribute__((weak));
 extern "C" void eden_heap_usage(std::size_t* held, std::size_t* in_use, std::size_t* returned) __attribute__((weak));
+extern "C" void eden_heap_detail(unsigned* arenas, std::size_t* arena_bytes, std::size_t* space_blocks,
+                                 std::size_t* space_free) __attribute__((weak));
 extern "C" unsigned eden_guest_memory_wanted(void) __attribute__((weak));
 extern "C" void eden_guest_memory_reserve(std::size_t* held, std::size_t* target) __attribute__((weak));
 #ifdef PS5_NATIVE
@@ -382,6 +386,35 @@ static void RefreshFreeMemory() {
         ::Common::GuestMemoryUsage(&guest_span, &guest_held);
         std::fprintf(stderr, "EDEN_MEMORY pool largest free block %zu MiB, short=%d; the guest's memory holds %zu MiB\n",
                      largest >> 20, int(view.short_memory), guest_held >> 20);
+        // Where the whole pool goes: what is taken (every allocated region of direct memory), and of
+        // it the guest's memory, the heap, the JIT's code and the sparse tables; the rest ("other")
+        // is the GPU's (the Vulkan allocator, the driver) and anything else.
+        std::size_t taken = 0;
+        unsigned regions = 0;
+        if (total > 0) {
+            DirectMemoryRegion region{};
+            std::int64_t offset = 0;
+            while (regions < 1'000'000 && offset < total &&
+                   sceKernelDirectMemoryQuery(offset, 1, &region, sizeof(region)) == 0 && region.end > offset) {
+                taken += static_cast<std::size_t>(region.end - region.start);
+                offset = region.end;
+                ++regions;
+            }
+        }
+        std::size_t heap_held = 0;
+        if (eden_heap_usage) eden_heap_usage(&heap_held, nullptr, nullptr);
+        std::size_t code_span = 0, code_held = 0, table_span = 0, table_held = 0;
+        ::Common::CodeRangeUsage(&code_span, &code_held);
+        ::Common::SparseUsage(&table_span, &table_held);
+        const std::size_t known_parts = guest_held + heap_held + code_held + table_held;
+        std::fprintf(stderr,
+                     "EDEN_BUDGET pool %lld MiB: taken %zu MiB, free %lld MiB (largest block %zu MiB, %u regions); "
+                     "guest %zu MiB, heap %zu MiB, JIT code %zu MiB, sparse tables %zu MiB, other (GPU and the rest) "
+                     "%zu MiB\n",
+                     static_cast<long long>(total >> 20), taken >> 20,
+                     static_cast<long long>((total - static_cast<std::int64_t>(taken)) >> 20), largest >> 20, regions,
+                     guest_held >> 20, heap_held >> 20, code_held >> 20, table_held >> 20,
+                     (taken > known_parts ? taken - known_parts : 0) >> 20);
         ReportHeap("every 20 s");
     }
     // The heap's empty spaces go back to the pool while it is short (every 2 s at most).
@@ -435,6 +468,17 @@ void ReportHeap(const char* why) {
     std::fprintf(stderr, "[EglantinePS5] heap: holds %zu MiB (%zu MiB of pieces, %zu MiB in %u large blocks), "
                          "%zu MiB of it in use; %zu MiB given back so far (%s)\n",
                  held >> 20, (held - large) >> 20, large >> 20, large_blocks, in_use >> 20, returned >> 20, why);
+    if (eden_heap_detail) {
+        // The pieces: the threads' arenas (8 MiB each, kept for good), the other blocks taken from the
+        // heap's spaces, and the room the spaces keep free (it goes back only with a whole space).
+        unsigned arenas = 0;
+        std::size_t arena_bytes = 0, space_blocks = 0, space_free = 0;
+        eden_heap_detail(&arenas, &arena_bytes, &space_blocks, &space_free);
+        const std::size_t in_arenas = in_use > large + space_blocks ? in_use - large - space_blocks : 0;
+        std::fprintf(stderr, "[EglantinePS5] heap pieces: %u arenas %zu MiB (about %zu MiB of it in use), other "
+                             "blocks %zu MiB, free room in the spaces %zu MiB\n",
+                     arenas, arena_bytes >> 20, in_arenas >> 20, space_blocks >> 20, space_free >> 20);
+    }
     if (eden_heap_sites_report) eden_heap_sites_report();
 }
 
