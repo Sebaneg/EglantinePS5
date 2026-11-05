@@ -325,6 +325,9 @@ inline bool ApplyEarly(const std::string& entry, bool& block_list_set) {
     // swap_intermedio=off: the swap file is written and read straight from the guest's slots, without the
     // bounce buffers (src/guest_memory_service.inc). Read as the game starts.
     else if (entry == "swap_intermedio=off") SetVariable("EDEN_SWAP_BOUNCE", "0");
+    // swap_comprimido=off: slots sent out go to the swap file only, not compressed into memory first
+    // (src/guest_memory_service.inc, "The swap in memory"). Read as the game starts.
+    else if (entry == "swap_comprimido=off") SetVariable("EDEN_SWAP_COMPRESS", "0");
     // atajos_bufer=off: the buffer cache checks every page of every bound range again at each draw,
     // as before Eglantine patch 0016 (from viejunerd/Eglantine-PS5-, their 0017). Read once.
     else if (entry == "atajos_bufer=off") SetVariable("EDEN_NX2_DRAW_TUNING", "0");

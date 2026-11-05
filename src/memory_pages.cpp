@@ -286,6 +286,7 @@ struct SparseRange {
     std::uint32_t* swap = nullptr;       // per slot: 1 + its place in the swap file, 0 none (guest_memory_service.inc)
     std::uint32_t* probe_at = nullptr;   // per slot: when it was put on probation (the swapper's clock, s)
     std::uint32_t* hot_until = nullptr;  // per slot: the swapper leaves it alone until then (its clock, s)
+    void** packed = nullptr;             // per slot: its bytes compressed in memory instead of the file, or null
     // lazy_zero: per zero run the range touches, 1 once its empty slots show the run (MapZeroOnFault).
     std::atomic<std::uint8_t>* zero_groups = nullptr;
     std::size_t first_group = 0;        // the run (address / run bytes) of zero_groups[0]
@@ -467,6 +468,8 @@ void ReleaseSparse(SparseRange& range) {
     range.probe_at = nullptr;
     delete[] range.hot_until;
     range.hot_until = nullptr;
+    delete[] range.packed;
+    range.packed = nullptr;
     range.begin.store(0, std::memory_order_release);
     delete[] range.zero_groups;
     range.zero_groups = nullptr;

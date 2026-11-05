@@ -1,0 +1,36 @@
+diff --git a/src/video_core/buffer_cache/buffer_cache.h b/src/video_core/buffer_cache/buffer_cache.h
+--- a/src/video_core/buffer_cache/buffer_cache.h
++++ b/src/video_core/buffer_cache/buffer_cache.h
+@@ -1592,6 +1592,17 @@
+         channel_state->index_buffer = NULL_BINDING;
+         return;
+     }
++    // EglantinePS5: an index buffer bound from its start up to first + count, when that is large.
++    // Mario Kart World's third lap asked for one larger than the pool's 838 MiB free block.
++    if (size >= (64U << 20)) {
++        static u32 logged{};
++        if (logged++ < 16) {
++            LOG_WARNING(HW_GPU, "Large index buffer: {} MiB bound (first {}, count {}, {} bytes each, "
++                        "{} MiB between its start and end addresses)",
++                        size >> 20, index_buffer_ref.first, index_buffer_ref.count,
++                        index_buffer_ref.FormatSizeInBytes(), address_size >> 20);
++        }
++    }
+     channel_state->index_buffer = Binding{
+         .device_addr = *device_addr,
+         .size = size,
+@@ -2179,6 +2190,14 @@
+         };
+     }
+     const u32 size = static_cast<u32>(overlap.end - overlap.begin);
++    // EglantinePS5: what asks for a large buffer (the joins above aside), to see where it comes from.
++    if (size >= (128U << 20)) {
++        static u32 logged{};
++        if (logged++ < 16) {
++            LOG_WARNING(HW_GPU, "Large buffer: {} MiB for {} MiB asked at {:#x}, {} buffers joined",
++                        size >> 20, wanted_size >> 20, overlap.begin, overlap.ids.size());
++        }
++    }
+     const BufferId new_buffer_id =
+         slot_buffers.insert(runtime, overlap.begin, size, sparse_compatible);
+     auto& new_buffer = slot_buffers[new_buffer_id];

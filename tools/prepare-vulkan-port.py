@@ -510,10 +510,12 @@ ALLOCATOR_REFUSED = """    VkResult created = CALL;
             const auto free_block = ::Eden::Performance::graphics_memory_free.load(std::memory_order_relaxed);
             std::size_t guest_span = 0, guest_held = 0;
             ::Common::GuestMemoryUsage(&guest_span, &guest_held);
-            std::fprintf(stderr, "EDEN_GRAPHICS_MEMORY refused outside the budget too (result %d): the pool's largest free "
-                         "block is %llu MiB; the allocator holds %llu MiB in blocks, %llu MiB of it in use; the guest's "
-                         "memory holds %llu MiB, the heap %llu MiB\\n",
-                         int(created), free_block ? free_block() >> 20 : 0ull, blocks >> 20, used >> 20,
+            // What was asked for too (DETAIL): Mario Kart World's third lap ended on a buffer larger than
+            // an 838 MiB free block, and this line did not say how large.
+            std::fprintf(stderr, "EDEN_GRAPHICS_MEMORY refused outside the budget too (result %d), DETAIL: the pool's "
+                         "largest free block is %llu MiB; the allocator holds %llu MiB in blocks, %llu MiB of it in use; "
+                         "the guest's memory holds %llu MiB, the heap %llu MiB\\n",
+                         int(created), VALUES, free_block ? free_block() >> 20 : 0ull, blocks >> 20, used >> 20,
                          static_cast<unsigned long long>(guest_held >> 20),
                          static_cast<unsigned long long>(eden_heap_committed() >> 20));
             ::Eden::Performance::ReportHeap("a buffer was refused");

@@ -10,6 +10,7 @@ the pool looks plentiful again: every byte must be as it was written, every slot
 the memory the slots held must go back while they are in the file. A slot cleared while it is in
 the file reads zeroes, and the session ends with the file's places given back.
 """
+import os
 import pathlib
 import subprocess
 import sys
@@ -197,7 +198,10 @@ void ClearGuestMemory(std::uint8_t* at, std::uint64_t offset, std::size_t bytes,
 }
 
 static std::uint64_t Word(std::size_t slot, std::size_t index, unsigned round) {
-    return (std::uint64_t{slot} << 40) ^ (std::uint64_t{index} * 0x9e3779b97f4a7c15ull) ^ round;
+    // Odd slots repeat each word 64 times: they compress (the swap in memory keeps them), the even
+    // ones do not (they go to the file), as a game's memory has both.
+    const std::size_t mixed = slot % 2 != 0 ? index / 64 : index;
+    return (std::uint64_t{slot} << 40) ^ (std::uint64_t{mixed} * 0x9e3779b97f4a7c15ull) ^ round;
 }
 static void Fill(std::uint8_t* base, std::size_t slot, unsigned round) {
     auto* words = reinterpret_cast<std::uint64_t*>(base + slot * Common::SparseSlot);
@@ -431,15 +435,26 @@ with tempfile.TemporaryDirectory(prefix='eden-swap-') as work:
     source = work / 'swap.cpp'
     source.write_text(MOCK + '#include <functional>\n#include "' + str(root / 'src/memory_pages.cpp') + '"\n' + TEST)
     binary = work / 'swap'
+    # The swap in memory needs LZ4 (weak in the service): linked when the host has it, so that both
+    # ways run: compressed in memory, then the file only (EDEN_SWAP_COMPRESS=0).
+    lz4 = ['-llz4'] if pathlib.Path('/usr/include/lz4.h').exists() else []
     subprocess.run(['clang++-18', '-std=c++20', '-O1', '-g', '-pthread', '-DPS5_NATIVE=1', '-Wall', '-Wno-unused-function',
                     f'-I{root / "src"}', f'-I{root / "Eglantine/src"}', f'-I{root / "headless"}', str(source),
                     '-Wl,--defsym=__eden_text_start=__executable_start', '-Wl,--defsym=__eden_text_end=etext',
-                    '-o', str(binary)], check=True)
-    result = subprocess.run([str(binary), str(work / 'swap.bin')], capture_output=True, text=True, timeout=300)
-    sys.stdout.write(result.stdout)
-    for line in result.stderr.splitlines():
-        if line.startswith(('EDEN_SWAP end', 'EDEN_SWAP_IO end', 'EDEN_GUEST_PLACEMENT')):
-            print(line)
-    if result.returncode != 0:
-        sys.stderr.write(result.stderr[-4000:])
-        sys.exit(f'guest memory swap check failed: exit {result.returncode}')
+                    '-o', str(binary)] + lz4, check=True)
+    for mode in (['packed', 'file'] if lz4 else ['file']):
+        environment = dict(os.environ)
+        if mode == 'file':
+            environment['EDEN_SWAP_COMPRESS'] = '0'
+        print(f'-- swap {"compressed in memory" if mode == "packed" else "to the file only"}')
+        result = subprocess.run([str(binary), str(work / ('swap-' + mode + '.bin'))], capture_output=True, text=True,
+                                timeout=300, env=environment)
+        sys.stdout.write(result.stdout)
+        for line in result.stderr.splitlines():
+            if line.startswith(('EDEN_SWAP end', 'EDEN_SWAP_IO end', 'EDEN_SWAP_PACK end', 'EDEN_GUEST_PLACEMENT')):
+                print(line)
+        if result.returncode != 0:
+            sys.stderr.write(result.stderr[-4000:])
+            sys.exit(f'guest memory swap check failed ({mode}): exit {result.returncode}')
+        if mode == 'packed' and 'EDEN_SWAP_PACK end on=1' not in result.stderr:
+            sys.exit('guest memory swap check failed: the swap in memory did not run')

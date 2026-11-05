@@ -59,6 +59,10 @@ struct Counters {
     // buffer, and the write or read itself; totals and the longest since the last report.
     std::atomic<std::uint64_t> out_copy_us{0}, out_io_us{0}, in_io_us{0}, in_copy_us{0}, bounced_out{0}, bounced_in{0};
     std::atomic<std::uint64_t> out_io_worst_us{0}, in_io_worst_us{0}, out_copy_worst_us{0}, in_copy_worst_us{0};
+    // The swap in memory: slots held compressed now and their bytes, slots compressed in all and those
+    // that did not compress enough (to the file), time to compress and to decompress (us).
+    std::atomic<std::uint64_t> packed_slots{0}, packed_bytes{0}, packs{0}, pack_misses{0};
+    std::atomic<std::uint64_t> pack_us{0}, unpack_us{0}, pack_worst_us{0}, unpack_worst_us{0};
 };
 Counters counters;
 void ResetCounters() noexcept {
@@ -271,6 +275,51 @@ bool PromoteShared(SparseRange& range, std::size_t slot) noexcept {
 // Own, Shared or Fine -> Zero: the slot shows the zero block again and its memory goes back.
 void FreeSwapPlace(std::uint32_t place) noexcept;
 std::atomic<std::size_t>& SwapHeld() noexcept;
+
+// The swap in memory (lab file swap_comprimido=off: the file only). A slot sent out is compressed
+// with LZ4 into the heap instead of being written to the file; one that does not get under 3/4 of
+// its size goes to the file as before. The file is on an SSD that wrote at 250 MB/s in one Mario
+// Kart World race and at 38 MB/s with 3.8 s writes and 1.9 s reads in the next, and a stall there
+// held the GPU's back thread through a graphics emergency until the freeze watch ended the game.
+// LZ4 is in the app for the game's NSO segments (common/lz4_compression.cpp); weak here, so a link
+// without it leaves the file only. Its decompression takes no memory and runs in the fault handler.
+extern "C" int LZ4_compress_default(const char* source, char* dest, int source_size, int max_dest_size)
+    __attribute__((weak));
+extern "C" int LZ4_decompress_safe(const char* source, char* dest, int compressed_size, int max_decompressed_size)
+    __attribute__((weak));
+struct PackedSlot {
+    PackedSlot* next; // on the list of those to free (DropPacked)
+    std::uint32_t bytes;
+    std::uint32_t reserved;
+};
+std::atomic<bool> pack_slots{true};
+std::atomic<PackedSlot*> packed_to_free{nullptr};
+bool CanPack() noexcept {
+    return pack_slots.load(std::memory_order_relaxed) && LZ4_compress_default != nullptr &&
+           LZ4_decompress_safe != nullptr;
+}
+// A packed slot's memory goes back later, on the swapper's thread (FreeDropped): a slot read back
+// in a fault handler must not call free(), which takes the heap's lock.
+void DropPacked(SparseRange& range, std::size_t slot) noexcept {
+    auto* packed = static_cast<PackedSlot*>(range.packed[slot]);
+    if (packed == nullptr) return;
+    range.packed[slot] = nullptr;
+    counters.packed_slots.fetch_sub(1, std::memory_order_relaxed);
+    counters.packed_bytes.fetch_sub(packed->bytes, std::memory_order_relaxed);
+    PackedSlot* head = packed_to_free.load(std::memory_order_relaxed);
+    do {
+        packed->next = head;
+    } while (!packed_to_free.compare_exchange_weak(head, packed, std::memory_order_release, std::memory_order_relaxed));
+}
+void FreeDropped() noexcept {
+    PackedSlot* packed = packed_to_free.exchange(nullptr, std::memory_order_acquire);
+    while (packed != nullptr) {
+        PackedSlot* const next = packed->next;
+        std::free(packed);
+        packed = next;
+    }
+}
+
 void ReturnSlot(SparseRange& range, std::size_t slot) noexcept {
     const std::uintptr_t at = SlotAddress(range, slot);
     const std::uint8_t state = SlotState(range, slot);
@@ -278,9 +327,13 @@ void ReturnSlot(SparseRange& range, std::size_t slot) noexcept {
 #ifdef PS5_NATIVE
         if (!MapZero(at, 1)) std::abort();
 #endif
-        FreeSwapPlace(range.swap[slot]);
-        range.swap[slot] = 0;
-        SwapHeld().fetch_sub(1, std::memory_order_relaxed);
+        if (range.packed != nullptr && range.packed[slot] != nullptr) {
+            DropPacked(range, slot);
+        } else {
+            FreeSwapPlace(range.swap[slot]);
+            range.swap[slot] = 0;
+            SwapHeld().fetch_sub(1, std::memory_order_relaxed);
+        }
         range.physical[slot] = -1;
         return;
     }
@@ -514,40 +567,76 @@ void NoteTime(std::atomic<std::uint64_t>& total, std::atomic<std::uint64_t>& wor
 // Probe -> Swapped (the slot is locked): its bytes to the file, its memory back to the pool, and its
 // address space kept reserved with nothing behind it, so that any access faults. False: it stays as
 // it was (on probation).
-bool SwapOut(SparseRange& range, std::size_t slot) noexcept {
-    EdenDoingScope doing{"swap: writing a slot to the SSD"};
-    const std::uintptr_t at = SlotAddress(range, slot);
-    const std::uint32_t place = TakeSwapPlace();
-    if (place == 0) return false;
-    // Read-only while it is written out: a reader goes on, a writer waits for the lock.
-    if (mprotect(reinterpret_cast<void*>(at), SparseSlot, PROT_READ) != 0) {
-        FreeSwapPlace(place);
-        return false;
-    }
-    const off_t offset = static_cast<off_t>(place - 1) * static_cast<off_t>(SparseSlot);
+// A slot's bytes compressed into the heap (the swap in memory, above), or null: no bounce buffer free
+// for the output, not under 3/4 of the slot, or no memory for it. Not in a fault handler (malloc).
+PackedSlot* Pack(const void* source) noexcept {
+    if (!CanPack()) return nullptr;
     const int bounce = TakeBounce();
-    const char* source = reinterpret_cast<const char*>(at);
-    if (bounce >= 0) {
-        const std::uint64_t copy_start = MonotonicUs();
-        std::memcpy(bounce_buffers[bounce], source, SparseSlot);
-        NoteTime(counters.out_copy_us, counters.out_copy_worst_us, MonotonicUs() - copy_start);
-        counters.bounced_out.fetch_add(1, std::memory_order_relaxed);
-        source = static_cast<const char*>(bounce_buffers[bounce]);
+    if (bounce < 0) return nullptr;
+    const std::uint64_t start = MonotonicUs();
+    const int bytes = LZ4_compress_default(static_cast<const char*>(source), static_cast<char*>(bounce_buffers[bounce]),
+                                           static_cast<int>(SparseSlot), static_cast<int>(SparseSlot / 4 * 3));
+    PackedSlot* packed = nullptr;
+    if (bytes > 0) packed = static_cast<PackedSlot*>(std::malloc(sizeof(PackedSlot) + static_cast<std::size_t>(bytes)));
+    if (packed != nullptr) {
+        packed->next = nullptr;
+        packed->bytes = static_cast<std::uint32_t>(bytes);
+        packed->reserved = 0;
+        std::memcpy(packed + 1, bounce_buffers[bounce], static_cast<std::size_t>(bytes));
+        counters.packed_slots.fetch_add(1, std::memory_order_relaxed);
+        counters.packed_bytes.fetch_add(static_cast<std::uint64_t>(bytes), std::memory_order_relaxed);
+        counters.packs.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        counters.pack_misses.fetch_add(1, std::memory_order_relaxed);
     }
-    const std::uint64_t io_start = MonotonicUs();
-    std::size_t done = 0;
-    while (done < SparseSlot) {
-        const ssize_t wrote = pwrite(swap_fd, source + done, SparseSlot - done, offset + static_cast<off_t>(done));
-        if (wrote <= 0) break;
-        done += static_cast<std::size_t>(wrote);
-    }
-    NoteTime(counters.out_io_us, counters.out_io_worst_us, MonotonicUs() - io_start);
     GiveBounce(bounce);
-    if (done != SparseSlot) {
-        if (mprotect(reinterpret_cast<void*>(at), SparseSlot, PROT_NONE) != 0) std::abort();
-        FreeSwapPlace(place);
-        counters.swap_failures.fetch_add(1, std::memory_order_relaxed);
-        return false;
+    NoteTime(counters.pack_us, counters.pack_worst_us, MonotonicUs() - start);
+    return packed;
+}
+
+bool SwapOut(SparseRange& range, std::size_t slot) noexcept {
+    const std::uintptr_t at = SlotAddress(range, slot);
+    // An Own slot (the emergency takes those too) is writable; a Probe slot has no access.
+    const int restore = SlotState(range, slot) == SlotOwn ? PROT_READ | PROT_WRITE : PROT_NONE;
+    // Read-only while it goes out: a reader goes on, a writer waits for the lock.
+    if (mprotect(reinterpret_cast<void*>(at), SparseSlot, PROT_READ) != 0) return false;
+    PackedSlot* packed = nullptr;
+    if (range.packed != nullptr) {
+        EdenDoingScope doing{"swap: compressing a slot into memory"};
+        packed = Pack(reinterpret_cast<const void*>(at));
+    }
+    std::uint32_t place = 0;
+    if (packed == nullptr) {
+        EdenDoingScope doing{"swap: writing a slot to the SSD"};
+        place = TakeSwapPlace();
+        std::size_t done = 0;
+        if (place != 0) {
+            const off_t offset = static_cast<off_t>(place - 1) * static_cast<off_t>(SparseSlot);
+            const int bounce = TakeBounce();
+            const char* source = reinterpret_cast<const char*>(at);
+            if (bounce >= 0) {
+                const std::uint64_t copy_start = MonotonicUs();
+                std::memcpy(bounce_buffers[bounce], source, SparseSlot);
+                NoteTime(counters.out_copy_us, counters.out_copy_worst_us, MonotonicUs() - copy_start);
+                counters.bounced_out.fetch_add(1, std::memory_order_relaxed);
+                source = static_cast<const char*>(bounce_buffers[bounce]);
+            }
+            const std::uint64_t io_start = MonotonicUs();
+            while (done < SparseSlot) {
+                const ssize_t wrote =
+                    pwrite(swap_fd, source + done, SparseSlot - done, offset + static_cast<off_t>(done));
+                if (wrote <= 0) break;
+                done += static_cast<std::size_t>(wrote);
+            }
+            NoteTime(counters.out_io_us, counters.out_io_worst_us, MonotonicUs() - io_start);
+            GiveBounce(bounce);
+        }
+        if (done != SparseSlot) {
+            if (mprotect(reinterpret_cast<void*>(at), SparseSlot, restore) != 0) std::abort();
+            FreeSwapPlace(place);
+            counters.swap_failures.fetch_add(1, std::memory_order_relaxed);
+            return false;
+        }
     }
     void* slot_at = reinterpret_cast<void*>(at);
     if (munmap(slot_at, SparseSlot) != 0) std::abort();
@@ -556,8 +645,12 @@ bool SwapOut(SparseRange& range, std::size_t slot) noexcept {
     if (sceKernelReleaseDirectMemory(range.physical[slot], SparseSlot) != 0) std::abort();
     range.physical[slot] = -1;
     range.swap[slot] = place;
+    if (packed != nullptr) {
+        range.packed[slot] = packed;
+    } else {
+        swap_held.fetch_add(1, std::memory_order_relaxed);
+    }
     guest_committed.fetch_sub(SparseSlot, std::memory_order_relaxed);
-    swap_held.fetch_add(1, std::memory_order_relaxed);
     counters.swap_outs.fetch_add(1, std::memory_order_relaxed);
     return true;
 }
@@ -565,7 +658,8 @@ bool SwapOut(SparseRange& range, std::size_t slot) noexcept {
 // Swapped -> Own (the slot is locked): a block of its own, filled from the file before the slot shows
 // it (a thread that reads meanwhile faults and waits for the lock). False: no block for it now.
 bool SwapIn(SparseRange& range, std::size_t slot) noexcept {
-    EdenDoingScope doing{"swap: reading a slot from the SSD"};
+    PackedSlot* const packed = range.packed != nullptr ? static_cast<PackedSlot*>(range.packed[slot]) : nullptr;
+    EdenDoingScope doing{packed != nullptr ? "swap: decompressing a slot from memory" : "swap: reading a slot from the SSD"};
     const std::uint64_t started_us = MonotonicUs();
     const std::uintptr_t at = SlotAddress(range, slot);
     std::int64_t physical = -1;
@@ -576,6 +670,17 @@ bool SwapIn(SparseRange& range, std::size_t slot) noexcept {
         return false;
     }
     const std::uint32_t place = range.swap[slot];
+    if (packed != nullptr) {
+        // Straight into the slot's new block: no memory taken (this runs in the fault handler).
+        const std::uint64_t unpack_start = MonotonicUs();
+        const int got = LZ4_decompress_safe(reinterpret_cast<const char*>(packed + 1), static_cast<char*>(view),
+                                            static_cast<int>(packed->bytes), static_cast<int>(SparseSlot));
+        NoteTime(counters.unpack_us, counters.unpack_worst_us, MonotonicUs() - unpack_start);
+        if (got != static_cast<int>(SparseSlot)) {
+            Note("EDEN_SWAP a slot of the guest's memory did not decompress whole\n");
+            std::abort();
+        }
+    } else {
     const off_t offset = static_cast<off_t>(place - 1) * static_cast<off_t>(SparseSlot);
     const int bounce = TakeBounce();
     char* target = bounce >= 0 ? static_cast<char*>(bounce_buffers[bounce]) : static_cast<char*>(view);
@@ -599,6 +704,7 @@ bool SwapIn(SparseRange& range, std::size_t slot) noexcept {
         Note("EDEN_SWAP could not read a slot of the guest's memory back from the swap file\n");
         std::abort();
     }
+    }
     if (munmap(view, SparseSlot) != 0) std::abort();
     if (!MapSlot(at, PROT_READ | PROT_WRITE, physical)) {
         (void)sceKernelReleaseDirectMemory(physical, SparseSlot);
@@ -606,9 +712,13 @@ bool SwapIn(SparseRange& range, std::size_t slot) noexcept {
     }
     range.physical[slot] = physical;
     range.swap[slot] = 0;
-    FreeSwapPlace(place);
+    if (packed != nullptr) {
+        DropPacked(range, slot);
+    } else {
+        FreeSwapPlace(place);
+        swap_held.fetch_sub(1, std::memory_order_relaxed);
+    }
     guest_committed.fetch_add(SparseSlot, std::memory_order_relaxed);
-    swap_held.fetch_sub(1, std::memory_order_relaxed);
     counters.swap_ins.fetch_add(1, std::memory_order_relaxed);
     MarkHot(range, slot, swap_hot_seconds.load(std::memory_order_relaxed));
     const std::uint64_t took_us = MonotonicUs() - started_us;
@@ -958,7 +1068,9 @@ bool AddStates(SparseRange& range) noexcept {
     auto* swap = fine_after ? new (std::nothrow) std::uint32_t[slots]() : nullptr;
     auto* probe_at = swap ? new (std::nothrow) std::uint32_t[slots]() : nullptr;
     auto* hot_until = probe_at ? new (std::nothrow) std::uint32_t[slots]() : nullptr;
-    if (hot_until == nullptr) {
+    auto* packed = hot_until ? new (std::nothrow) void*[slots]() : nullptr;
+    if (packed == nullptr) {
+        delete[] hot_until;
         delete[] probe_at;
         delete[] state;
         delete[] fine;
@@ -971,6 +1083,7 @@ bool AddStates(SparseRange& range) noexcept {
     range.swap = swap;
     range.probe_at = probe_at;
     range.hot_until = hot_until;
+    range.packed = packed;
     for (std::size_t slot = 0; slot < slots; ++slot)
         state[slot].store(range.owned[slot].load(std::memory_order_relaxed) ? SlotOwn : SlotZero, std::memory_order_relaxed);
     range.state = state;
@@ -1219,6 +1332,23 @@ void ServiceReport(SparseRange& range, const char* when) noexcept {
             (unsigned long long)(counters.in_copy_worst_us.exchange(0) / 1000),
             (unsigned long long)(counters.out_copy_us.load() / 1000), (unsigned long long)(counters.in_copy_us.load() / 1000));
         if (trip_length > 0 && outs != 0) Report(trip_line);
+        // The swap in memory: what it holds and in how much, how many slots did not compress enough
+        // (those went to the file), and the time to compress and decompress one.
+        const std::uint64_t held_slots = counters.packed_slots.load(), held_bytes = counters.packed_bytes.load();
+        const std::uint64_t packs = counters.packs.load(), misses = counters.pack_misses.load();
+        char pack_line[384];
+        const int pack_length = std::snprintf(pack_line, sizeof(pack_line),
+            "EDEN_SWAP_PACK %s on=%d held_slots=%llu held_mib=%.1f of_mib=%llu ratio=%.2f packs=%llu "
+            "not_compressible=%llu pack_avg_ms=%.2f pack_worst_ms=%.1f unpack_avg_ms=%.2f unpack_worst_ms=%.1f\n",
+            when, CanPack() ? 1 : 0, (unsigned long long)held_slots, held_bytes / 1048576.0,
+            (unsigned long long)(held_slots * (SparseSlot >> 20)),
+            held_slots == 0 ? 0.0 : static_cast<double>(held_bytes) / static_cast<double>(held_slots * SparseSlot),
+            (unsigned long long)packs, (unsigned long long)misses,
+            packs + misses == 0 ? 0.0 : counters.pack_us.load() / 1000.0 / static_cast<double>(packs + misses),
+            counters.pack_worst_us.exchange(0) / 1000.0,
+            counters.swap_ins.load() == 0 ? 0.0 : counters.unpack_us.load() / 1000.0 / static_cast<double>(counters.swap_ins.load()),
+            counters.unpack_worst_us.exchange(0) / 1000.0);
+        if (pack_length > 0 && packs + misses != 0) Report(pack_line);
     }
     // Who wrote the slots that were promoted: the largest places (offsets in the app's image).
     struct Top { const WriterSite* site; std::uint64_t count; } top[10]{};
@@ -1369,6 +1499,7 @@ void SwapperLoop(SparseRange* range) {
         const auto now = static_cast<std::uint32_t>(
             std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - started).count());
         swap_clock.store(now, std::memory_order_relaxed);
+        FreeDropped(); // packed slots read back since the last round
         const bool wanted = memory_waiters.load(std::memory_order_acquire) != 0;
         // The whole pool is looked through only when its largest block says it may be short.
         std::size_t free = PoolLargestFree() >= SwapQuietBytes && !wanted ? ~std::size_t{0} : PoolFree();
@@ -1612,6 +1743,8 @@ void ServiceStart(SparseRange& range) noexcept {
                                 std::memory_order_relaxed);
         const char* for_block = std::getenv("EDEN_SWAP_FOR_BLOCK");
         swap_for_block.store(for_block != nullptr && for_block[0] == '1', std::memory_order_relaxed);
+        const char* compress = std::getenv("EDEN_SWAP_COMPRESS");
+        pack_slots.store(!(compress != nullptr && compress[0] == '0'), std::memory_order_relaxed);
         const char* hot = std::getenv("EDEN_SWAP_HOT_SECONDS");
         swap_hot_seconds.store(static_cast<std::uint32_t>(
                                    std::min<unsigned long>(hot != nullptr ? std::strtoul(hot, nullptr, 10) : 120, 3600)),
@@ -1689,13 +1822,18 @@ void ReleaseServiceBlocks(SparseRange& range) noexcept {
             if (sceKernelReleaseDirectMemory(range.physical[slot], SparseSlot) != 0) std::abort();
             guest_committed.fetch_sub(SparseSlot, std::memory_order_relaxed);
         } else if (state == SlotSwapped) {
-            FreeSwapPlace(range.swap[slot]);
-            range.swap[slot] = 0;
-            swap_held.fetch_sub(1, std::memory_order_relaxed);
+            if (range.packed != nullptr && range.packed[slot] != nullptr) {
+                DropPacked(range, slot);
+            } else {
+                FreeSwapPlace(range.swap[slot]);
+                range.swap[slot] = 0;
+                swap_held.fetch_sub(1, std::memory_order_relaxed);
+            }
         }
         if (state == SlotOwn || state == SlotProbe) guest_committed.fetch_sub(SparseSlot, std::memory_order_relaxed);
         range.owned[slot].store(false, std::memory_order_relaxed);
     }
+    FreeDropped(); // the packed slots' memory (DropPacked above)
 #else
     const std::size_t slots = (range.end - range.begin.load(std::memory_order_relaxed)) / SparseSlot;
     for (std::size_t slot = 0; slot < slots; ++slot) {

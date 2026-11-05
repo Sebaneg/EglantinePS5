@@ -226,6 +226,13 @@ def main():
               f"slow reads {last.get('slow_swap_ins', '?')}, hot_seconds {last.get('hot_seconds', '?')}")
         worst = max(num(s.get('swap_in_worst_ms', '0')) for s in swaps)
         print(f'  slowest read back: {worst:.0f} ms')
+        packs = [fields(l) for l in stderr if l.startswith('EDEN_SWAP_PACK ')]
+        if packs:
+            k = packs[-1]
+            print(f"  in memory (compressed): {k.get('held_slots')} slots, {k.get('held_mib')} MiB for {k.get('of_mib')} MiB "
+                  f"(ratio {k.get('ratio')}); compressed {k.get('packs')}, to the file {k.get('not_compressible')}; "
+                  f"compress {k.get('pack_avg_ms')} ms avg, decompress {k.get('unpack_avg_ms')} ms avg, worst "
+                  f"{max(num(x.get('unpack_worst_ms', '0')) for x in packs):.1f} ms")
         trips = [fields(l) for l in stderr if l.startswith('EDEN_SWAP_IO ')]
         if trips:
             t = trips[-1]
