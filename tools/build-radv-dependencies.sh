@@ -39,6 +39,20 @@ for lang, compiler in [('c', 'prospero-clang'), ('cpp', 'prospero-clang++')]:
     s = s.replace(plain, cached)
 p.write_text(s)
 PY
+# The Mesa revision is ours (tools/deps.json, ps5-mesa), not the one the pinned PS5_Vulkan writes
+# into its build-radv.sh: Mesa f5610fe27 backs a large buffer with several direct-memory ranges
+# (Mario Kart World's third lap ended on a buffer larger than the largest free block), and the
+# build and link recipes are the same for it (PS5_Vulkan's own later pin differs in that line only).
+python3 - "$vulkan/tools/build-radv.sh" "$(pin ps5-mesa)" <<'PY'
+from pathlib import Path
+import re
+import sys
+p = Path(sys.argv[1])
+s = p.read_text()
+s, count = re.subn(r'^mesa_revision=.*$', f'mesa_revision={sys.argv[2]}', s, count=1, flags=re.M)
+assert count == 1, 'Unexpected upstream Mesa revision line in build-radv.sh'
+p.write_text(s)
+PY
 bash "$vulkan/tools/setup-native-dependencies.sh"
 bash "$vulkan/tools/build-radv.sh" release
 python3 "$root/tools/patch-radv-wsi.py"
