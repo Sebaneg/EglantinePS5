@@ -33,6 +33,7 @@ namespace Common {
 void SetGuestMemoryService(bool on, bool scan, bool dedup) noexcept;
 void SetGuestMemoryFine(bool on) noexcept;
 void SetGuestMemoryReserve(std::size_t mib) noexcept;
+void SetGuestMemorySwap(bool on, const char* path, unsigned cold_seconds) noexcept;
 } // namespace Common
 
 namespace Eden::Lab {
@@ -112,6 +113,7 @@ inline void Restore() {
     ::Settings::values.accelerate_astc.SetValue(d.astc);
     ::Settings::values.astc_recompression.SetValue(d.astc_recompression);
     Common::SetGuestMemoryReserve(1024);
+    Common::SetGuestMemorySwap(false, nullptr, 8);
     ::Settings::values.vertex_input_dynamic_state.SetValue(d.vertex_input_dynamic);
     ::Settings::values.gpu_clock.SetValue(d.gpu_clock);
     ::Settings::values.dyna_state.SetValue(d.dyna_state);
@@ -247,6 +249,14 @@ inline bool ApplyEarly(const std::string& entry, bool& block_list_set) {
     else if (entry == "memoria_compacta=on" || entry == "memoria_compacta=off")
         Common::SetGuestMemoryFine(entry.ends_with("on"));
     // The game's headroom (MiB, 32 to 1024; 1024 without this line): blocks held for its writes.
+    // The game's memory nothing touched goes to a file on the SSD while memory is short, and comes
+    // back when it is touched (src/guest_memory_service.inc, "Swap"). swap_frio=N: seconds a block
+    // must go untouched first (2 to 120; 8 without the line). Both read as the game starts.
+    else if (entry == "swap=on" || entry == "swap=off") {
+        static const std::string path = std::string{Eden::kDataDir} + "/swap_juego.bin";
+        Common::SetGuestMemorySwap(entry.ends_with("on"), path.c_str(), 0);
+    } else if (entry.starts_with("swap_frio=") && Number(entry, 10, n) && n >= 2 && n <= 120)
+        SetVariable("EDEN_SWAP_COLD_SECONDS", entry.c_str() + 10);
     else if (entry.starts_with("reserva_juego=") && Number(entry, 14, n))
         Common::SetGuestMemoryReserve(static_cast<std::size_t>(n));
     else if (entry == "bloques_repetidos=on" || entry == "bloques_repetidos=off")

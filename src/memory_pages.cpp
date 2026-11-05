@@ -54,6 +54,8 @@ std::int32_t sceKernelMapDirectMemory(void**, std::size_t, int, int, std::int64_
 std::int32_t sceKernelReleaseDirectMemory(std::int64_t, std::size_t);
 std::int32_t sceKernelReserveVirtualRange(void**, std::size_t, int, std::size_t);
 std::int32_t sceKernelEnableDmemAliasing();
+std::int32_t sceKernelAvailableDirectMemorySize(std::int64_t, std::int64_t, std::size_t, std::int64_t*,
+                                                std::size_t*);
 int sceKernelDebugOutText(int, const char*);
 }
 #endif
@@ -277,6 +279,8 @@ struct SparseRange {
     bool promote = false;               // writes to shared slots are promoted (the service runs)
     std::uint16_t* fine = nullptr;      // per slot: 16 KiB pages a Fine slot keeps (low 8 bits), times made whole (bits 8-11)
     std::uint32_t* fine_after = nullptr; // per slot: the scan pass from which it may be made Fine again
+    std::uint32_t* swap = nullptr;       // per slot: 1 + its place in the swap file, 0 none (guest_memory_service.inc)
+    std::uint32_t* probe_at = nullptr;   // per slot: when it was put on probation (the swapper's clock, s)
     // lazy_zero: per zero run the range touches, 1 once its empty slots show the run (MapZeroOnFault).
     std::atomic<std::uint8_t>* zero_groups = nullptr;
     std::size_t first_group = 0;        // the run (address / run bytes) of zero_groups[0]
@@ -433,6 +437,10 @@ void ReleaseSparse(SparseRange& range) {
     range.fine = nullptr;
     delete[] range.fine_after;
     range.fine_after = nullptr;
+    delete[] range.swap;
+    range.swap = nullptr;
+    delete[] range.probe_at;
+    range.probe_at = nullptr;
     range.begin.store(0, std::memory_order_release);
     delete[] range.zero_groups;
     range.zero_groups = nullptr;
