@@ -438,7 +438,7 @@ with tempfile.TemporaryDirectory(prefix='eden-swap-') as work:
     result = subprocess.run([str(binary), str(work / 'swap.bin')], capture_output=True, text=True, timeout=300)
     sys.stdout.write(result.stdout)
     for line in result.stderr.splitlines():
-        if line.startswith(('EDEN_SWAP end', 'EDEN_GUEST_PLACEMENT')):
+        if line.startswith(('EDEN_SWAP end', 'EDEN_SWAP_IO end', 'EDEN_GUEST_PLACEMENT')):
             print(line)
     if result.returncode != 0:
         sys.stderr.write(result.stderr[-4000:])

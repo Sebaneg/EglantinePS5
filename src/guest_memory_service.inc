@@ -55,6 +55,10 @@ struct Counters {
     // Swap reads that took 50 ms or more, and the longest since the last report (microseconds).
     std::atomic<std::uint64_t> slow_swap_ins{0}, swap_in_worst_us{0};
     std::atomic<std::uint64_t> swap_in_window_worst_us{0}; // the same for EDEN_TIMELINE2 (2 s)
+    // Where a slot's trip to and from the file goes (microseconds): the copy to or from the bounce
+    // buffer, and the write or read itself; totals and the longest since the last report.
+    std::atomic<std::uint64_t> out_copy_us{0}, out_io_us{0}, in_io_us{0}, in_copy_us{0}, bounced_out{0}, bounced_in{0};
+    std::atomic<std::uint64_t> out_io_worst_us{0}, in_io_worst_us{0}, out_copy_worst_us{0}, in_copy_worst_us{0};
 };
 Counters counters;
 void ResetCounters() noexcept {
@@ -483,6 +487,29 @@ void FreeSwapPlace(std::uint32_t place) noexcept {
     swap_lock.clear(std::memory_order_release);
 }
 
+// Bounce buffers for the swap file's reads and writes: anonymous memory of the system's own, not the
+// direct memory the guest's slots are. Mario Kart World's swap wrote about 1 MB/s straight from the
+// slots (1.6 to 1.9 s for 2 MiB) and read back as slowly; through these, the copy and the write are
+// timed apart (EDEN_SWAP: copy_*, write_*, read_*), which says whether the slots' memory or the SSD
+// is the slow part. Four, taken lock-free (a slot read back in a fault handler takes one too); none
+// free, or EDEN_SWAP_BOUNCE=0 (lab file swap_intermedio=off): straight from and to the slot, as before.
+constexpr unsigned BounceCount = 4;
+void* bounce_buffers[BounceCount] = {};
+std::atomic<bool> bounce_busy[BounceCount] = {};
+int TakeBounce() noexcept {
+    for (unsigned i = 0; i < BounceCount; ++i)
+        if (bounce_buffers[i] != nullptr && !bounce_busy[i].exchange(true, std::memory_order_acquire)) return static_cast<int>(i);
+    return -1;
+}
+void GiveBounce(int index) noexcept {
+    if (index >= 0) bounce_busy[index].store(false, std::memory_order_release);
+}
+void NoteTime(std::atomic<std::uint64_t>& total, std::atomic<std::uint64_t>& worst, std::uint64_t us) noexcept {
+    total.fetch_add(us, std::memory_order_relaxed);
+    for (std::uint64_t seen = worst.load(std::memory_order_relaxed);
+         us > seen && !worst.compare_exchange_weak(seen, us, std::memory_order_relaxed);) {}
+}
+
 #ifdef PS5_NATIVE
 // Probe -> Swapped (the slot is locked): its bytes to the file, its memory back to the pool, and its
 // address space kept reserved with nothing behind it, so that any access faults. False: it stays as
@@ -498,13 +525,24 @@ bool SwapOut(SparseRange& range, std::size_t slot) noexcept {
         return false;
     }
     const off_t offset = static_cast<off_t>(place - 1) * static_cast<off_t>(SparseSlot);
+    const int bounce = TakeBounce();
+    const char* source = reinterpret_cast<const char*>(at);
+    if (bounce >= 0) {
+        const std::uint64_t copy_start = MonotonicUs();
+        std::memcpy(bounce_buffers[bounce], source, SparseSlot);
+        NoteTime(counters.out_copy_us, counters.out_copy_worst_us, MonotonicUs() - copy_start);
+        counters.bounced_out.fetch_add(1, std::memory_order_relaxed);
+        source = static_cast<const char*>(bounce_buffers[bounce]);
+    }
+    const std::uint64_t io_start = MonotonicUs();
     std::size_t done = 0;
     while (done < SparseSlot) {
-        const ssize_t wrote = pwrite(swap_fd, reinterpret_cast<const char*>(at) + done, SparseSlot - done,
-                                     offset + static_cast<off_t>(done));
+        const ssize_t wrote = pwrite(swap_fd, source + done, SparseSlot - done, offset + static_cast<off_t>(done));
         if (wrote <= 0) break;
         done += static_cast<std::size_t>(wrote);
     }
+    NoteTime(counters.out_io_us, counters.out_io_worst_us, MonotonicUs() - io_start);
+    GiveBounce(bounce);
     if (done != SparseSlot) {
         if (mprotect(reinterpret_cast<void*>(at), SparseSlot, PROT_NONE) != 0) std::abort();
         FreeSwapPlace(place);
@@ -539,12 +577,22 @@ bool SwapIn(SparseRange& range, std::size_t slot) noexcept {
     }
     const std::uint32_t place = range.swap[slot];
     const off_t offset = static_cast<off_t>(place - 1) * static_cast<off_t>(SparseSlot);
+    const int bounce = TakeBounce();
+    char* target = bounce >= 0 ? static_cast<char*>(bounce_buffers[bounce]) : static_cast<char*>(view);
+    const std::uint64_t io_start = MonotonicUs();
     std::size_t done = 0;
     while (done < SparseSlot) {
-        const ssize_t read = pread(swap_fd, static_cast<char*>(view) + done, SparseSlot - done,
-                                   offset + static_cast<off_t>(done));
+        const ssize_t read = pread(swap_fd, target + done, SparseSlot - done, offset + static_cast<off_t>(done));
         if (read <= 0) break;
         done += static_cast<std::size_t>(read);
+    }
+    NoteTime(counters.in_io_us, counters.in_io_worst_us, MonotonicUs() - io_start);
+    if (bounce >= 0) {
+        const std::uint64_t copy_start = MonotonicUs();
+        if (done == SparseSlot) std::memcpy(view, target, SparseSlot);
+        NoteTime(counters.in_copy_us, counters.in_copy_worst_us, MonotonicUs() - copy_start);
+        counters.bounced_in.fetch_add(1, std::memory_order_relaxed);
+        GiveBounce(bounce);
     }
     if (done != SparseSlot) {
         // The game's bytes are lost: nothing can go on after that.
@@ -1152,6 +1200,25 @@ void ServiceReport(SparseRange& range, const char* when) noexcept {
             (unsigned long long)(counters.swap_in_worst_us.exchange(0, std::memory_order_relaxed) / 1000),
             static_cast<unsigned>(swap_hot_seconds.load(std::memory_order_relaxed)));
         if (swap_length > 0) Report(swap_line);
+        // The trip to and from the file, apart (bounce buffers above): MiB/s of the writes and reads
+        // themselves, and the longest copy, write and read since the last report.
+        const auto rate = [](std::uint64_t slots, std::uint64_t us) {
+            return us == 0 ? 0.0 : static_cast<double>(slots) * (SparseSlot >> 20) * 1e6 / static_cast<double>(us);
+        };
+        const std::uint64_t outs = counters.swap_outs.load(), ins = counters.swap_ins.load();
+        char trip_line[384];
+        const int trip_length = std::snprintf(trip_line, sizeof(trip_line),
+            "EDEN_SWAP_IO %s write_mib_s=%.1f read_mib_s=%.1f bounced_out=%llu bounced_in=%llu "
+            "write_worst_ms=%llu read_worst_ms=%llu copy_out_worst_ms=%llu copy_in_worst_ms=%llu "
+            "copy_out_total_ms=%llu copy_in_total_ms=%llu\n",
+            when, rate(outs, counters.out_io_us.load()), rate(ins, counters.in_io_us.load()),
+            (unsigned long long)counters.bounced_out.load(), (unsigned long long)counters.bounced_in.load(),
+            (unsigned long long)(counters.out_io_worst_us.exchange(0) / 1000),
+            (unsigned long long)(counters.in_io_worst_us.exchange(0) / 1000),
+            (unsigned long long)(counters.out_copy_worst_us.exchange(0) / 1000),
+            (unsigned long long)(counters.in_copy_worst_us.exchange(0) / 1000),
+            (unsigned long long)(counters.out_copy_us.load() / 1000), (unsigned long long)(counters.in_copy_us.load() / 1000));
+        if (trip_length > 0 && outs != 0) Report(trip_line);
     }
     // Who wrote the slots that were promoted: the largest places (offsets in the app's image).
     struct Top { const WriterSite* site; std::uint64_t count; } top[10]{};
@@ -1551,6 +1618,13 @@ void ServiceStart(SparseRange& range) noexcept {
                                std::memory_order_relaxed);
         swap_clock.store(0, std::memory_order_relaxed);
         swap_fd = open(swap_path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+        const char* bounce_env = std::getenv("EDEN_SWAP_BOUNCE");
+        if (!(bounce_env != nullptr && bounce_env[0] == '0'))
+            for (unsigned i = 0; i < BounceCount; ++i)
+                if (bounce_buffers[i] == nullptr) {
+                    void* buffer = mmap(nullptr, SparseSlot, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+                    bounce_buffers[i] = buffer == MAP_FAILED ? nullptr : buffer;
+                }
         swapping = swap_fd >= 0;
         if (swapping) {
             for (auto& word : swap_used) word = 0;
@@ -1676,16 +1750,25 @@ extern "C" std::size_t eden_guest_memory_emergency(std::size_t wanted) noexcept 
     }
     if (guest_blocks_high.load(std::memory_order_relaxed)) std::sort(candidates.begin(), candidates.end());
     constexpr std::size_t MostSlots = 256; // 512 MiB
+    // It runs on the thread whose allocation was refused, the GPU thread: with the SSD writing about
+    // 1 MB/s, 512 MiB took minutes, and Mario Kart World froze leaving a race (the freeze watch ended
+    // it after 30 s). At most EDEN_SWAP_EMERGENCY_MS (4000) of writing, and it looks at the largest
+    // block every 4 slots; what is still missing, the caller's next try and the texture collector find.
+    static const std::uint64_t most_us = [] {
+        const char* value = std::getenv("EDEN_SWAP_EMERGENCY_MS");
+        return (value != nullptr ? std::strtoull(value, nullptr, 10) : 4000ULL) * 1000ULL;
+    }();
+    const std::uint64_t emergency_start = MonotonicUs();
     std::size_t sent = 0;
     for (const auto& candidate : candidates) {
-        if (sent >= MostSlots) break;
+        if (sent >= MostSlots || MonotonicUs() - emergency_start >= most_us) break;
         const std::size_t slot = candidate.second;
         if (range->state[slot].load(std::memory_order_acquire) & SlotLock) continue;
         LockSlot(*range, slot);
         const std::uint8_t state = SlotState(*range, slot);
         const bool out = (state == SlotOwn || state == SlotProbe) && SwapOut(*range, slot);
         UnlockSlot(*range, slot, out ? SlotSwapped : state);
-        if (out && ++sent % 16 == 0 && PoolLargestFree() >= wanted) break;
+        if (out && ++sent % 4 == 0 && PoolLargestFree() >= wanted) break;
     }
     counters.emergencies.fetch_add(1, std::memory_order_relaxed);
     return sent * SparseSlot;

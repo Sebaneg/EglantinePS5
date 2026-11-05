@@ -118,6 +118,7 @@ Estas se aplican **después** de los ajustes del juego (Ajustes > Rendimiento), 
 | `swap=on` | **Intercambio a disco de la memoria del juego.** Cuando la memoria escasea, los bloques de 2 MB del juego que nadie toca desde hace unos segundos se guardan en `/data/eglantineps5/swap_juego.bin` y su memoria vuelve a la consola; si el juego los vuelve a usar, se leen del SSD (~1 ms) y sigue. Así el juego no se cierra cuando su memoria no cabe: en el peor caso da un tirón. Empieza a vigilar bloques con menos de 2,5 GB libres en total y a guardarlos con menos de 1 GB libre en total, hasta volver a 1,5 GB. Si la memoria libre está troceada pero hay bastante en total, no guarda nada (no serviría). Se lee al empezar el juego. En `stderr.log`: `EDEN_SWAP now probation=... swapped=... swap_outs=... swap_ins=...`. Además, si la gráfica pide memoria y no hay, en vez de cerrarse el juego manda al SSD al instante hasta 512 MB del juego (del borde junto a la gráfica) y lo vuelve a intentar hasta 3 veces (en `stderr.log`: `EDEN_GRAPHICS_MEMORY emergency`). Prueba de PC: `tools/check-guest-swap.py`. |
 | `swap_frio=N` | Segundos sin que nadie toque un bloque antes de poder guardarlo en el disco (de 2 a 120; sin esta línea, 8). Más bajo libera antes pero puede traer bloques de vuelta más a menudo. Solo con `swap=on`. |
 | `swap_bloque=on` | El swap también escribe al SSD para agrandar el bloque libre más grande de la memoria (con `juego_arriba=on`), como antes. Sin esta línea no lo hace: en Mario Kart World ese bloque se quedó en 62 MB mientras el swap escribía 64 MB cada 10 s, con 1,4 GB libres, y el SSD (que escribe a ~1 MB/s) pasaba ocupado todo el tiempo: lecturas del swap de hasta 2,8 s y tirones largos. Si a los gráficos les falta un bloque, el rescate de emergencia saca memoria al momento. Además, salvo urgencia (menos de 512 MB libres, o el juego esperando memoria), el swap escribe un bloque y deja descansar al SSD. Se lee al arrancar el juego. Solo con `swap=on`. |
+| `swap_intermedio=off` | El swap escribe y lee el SSD directamente desde la memoria del juego, como antes. Sin esta línea pasa por cuatro búferes intermedios de memoria normal del sistema, y la línea `EDEN_SWAP_IO` de `stderr.log` dice por separado la velocidad del SSD (`write_mib_s`, `read_mib_s`) y lo que tardan las copias. Así se sabe si lo lento es el SSD o copiar desde la memoria del juego (en Mario Kart World, ~1 MB/s escribiendo directo). Solo con `swap=on`. |
 | `swap_caliente=N` | Segundos que un bloque que volvió del disco se queda en memoria sin que el swap lo vuelva a tocar (de 0 a 3600; sin esta línea, 120). Un bloque que el juego tocó mientras estaba "a prueba" queda protegido la cuarta parte de ese tiempo. En la carrera de Mario Kart World el swap sacaba memoria que el juego volvía a usar en la vuelta siguiente: 591 de 1232 bloques volvieron, cada uno con una lectura del SSD dentro del hilo del juego, y la carrera se paraba de 1 a 10 s. `0` deja el swap como antes. El rescate de emergencia de los gráficos sigue pudiendo sacarlos. En `stderr.log`, la línea `EDEN_SWAP` dice `slow_swap_ins=` (lecturas de 50 ms o más) y `swap_in_worst_ms=` (la más lenta desde la línea anterior). Solo con `swap=on`. |
 | `heap_bloque_propio=N` | La memoria interna del emulador: los bloques de N MB o más (de 2 a 32; sin esta línea, 32) tienen memoria aparte, que vuelve a la consola al liberarlos. Si no, dejan huecos que solo otro bloque del mismo tamaño puede usar. Puede ir algo más lento. En `stderr.log`, la línea `heap: holds ... MiB, ... MiB of it in use` dice cuánto retiene y cuánto usa. Para probar: `heap_bloque_propio=4`. |
 | `heap_trozo=N` | Cuánto crece de golpe la memoria interna del emulador: 32, 64, 96 o 128 MB (sin esta línea, 128). Solo un trozo que se queda completamente vacío vuelve a la consola, y uno de 128 MB casi nunca se vacía: Mario Kart World retenía 2,7 GB con 1,4 GB en uso. Con trozos más pequeños se vacían y se devuelven más a menudo. Puede ir algo más lento. En `stderr.log`, la línea `heap: holds ... MiB, ... MiB of it in use` dice cuánto retiene y cuánto usa. Para probar: `heap_trozo=32`. |
@@ -183,3 +184,21 @@ python3 tools/analyze-run.py CARPETA_DE_LOGS EglantinePS5-v1.000.000.elf
 ```
 
 El `.elf` es el artefacto `EglantinePS5-symbols` de la compilación que se probó.
+
+## Calidad de imagen
+
+En el menú de la app (Ajustes > Video, o Biblioteca > ajustes del juego > Video):
+
+| Ajuste | Efecto | Coste |
+|---|---|---|
+| Filtro **AMD FSR** en lugar de Bilinear | Escala la imagen interna a la salida con bordes nítidos, en vez de borrosa. La mejora más grande para 0.5x. | Casi nada: un paso más en la GPU por cuadro, sin memoria extra. |
+| Resolución **0.75x** en lugar de 0.5x | Más detalle real. | Unas 2,25 veces los píxeles por cuadro y más memoria de gráficos para las imágenes en las que dibuja el juego. Probar cuando el swap ya no frene. |
+
+En `laboratorio.txt`:
+
+| Opción | Qué hace | Coste |
+|---|---|---|
+| `anisotropico=N` | Texturas vistas en ángulo (la pista por delante, el suelo) nítidas en vez de borrosas. `N` = 2, 4, 8 o 16; `0` deja lo que pide el juego (sin la línea). | Poco en la GPU, nada de memoria. `anisotropico=8` es un buen punto. |
+| `aa=off` / `aa=fxaa` / `aa=smaa` | Suaviza los bordes dentados. Sin la línea: `fxaa`. `smaa` suaviza mejor y emborrona menos. | `smaa` cuesta un poco más de GPU que `fxaa`. |
+| `nitidez_fsr=N` | Cuánto enfoca el filtro AMD FSR (de 0 a 200; sin la línea, 25). `50` a `80` se ve más nítido a 0.5x. | Nada. |
+| quitar `astc_bc1=on` | Las texturas con transparencias (humo, hojas, cristales) recuperan sus bordes suaves. | El doble de memoria para esas texturas: probar cuando sobre memoria. |

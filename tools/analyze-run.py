@@ -226,6 +226,16 @@ def main():
               f"slow reads {last.get('slow_swap_ins', '?')}, hot_seconds {last.get('hot_seconds', '?')}")
         worst = max(num(s.get('swap_in_worst_ms', '0')) for s in swaps)
         print(f'  slowest read back: {worst:.0f} ms')
+        trips = [fields(l) for l in stderr if l.startswith('EDEN_SWAP_IO ')]
+        if trips:
+            t = trips[-1]
+            print(f"  SSD: writes {t.get('write_mib_s')} MiB/s, reads {t.get('read_mib_s')} MiB/s; slowest write "
+                  f"{max(num(x.get('write_worst_ms', '0')) for x in trips):.0f} ms, read "
+                  f"{max(num(x.get('read_worst_ms', '0')) for x in trips):.0f} ms; copies to/from the bounce buffers "
+                  f"{t.get('copy_out_total_ms')}/{t.get('copy_in_total_ms')} ms in all")
+            if num(t.get('write_mib_s', '0')) and num(t.get('write_mib_s', '0')) < 20:
+                verdict.append(f"The SSD writes the swap file at {t.get('write_mib_s')} MiB/s even from plain memory: "
+                               'the file system is the slow part (a swap in compressed memory would avoid it).')
         if outs and ins / outs > 0.3:
             verdict.append(f'Swap: {ins / outs * 100:.0f}% of what went to the SSD came back: it sends out memory '
                            'the game still uses (raise swap_caliente / swap_frio).')

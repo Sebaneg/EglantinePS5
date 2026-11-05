@@ -67,6 +67,9 @@ struct Defaults {
     ::Settings::VSyncMode vsync;
     bool async_presentation;
     bool log_flush_line;
+    ::Settings::AnisotropyMode anisotropy;
+    ::Settings::AntiAliasing anti_aliasing;
+    int fsr_sharpening;
 };
 
 inline const Defaults& Initial() {
@@ -84,7 +87,8 @@ inline const Defaults& Initial() {
         ::Settings::values.vertex_input_dynamic_state.GetValue(),
         ::Settings::values.gpu_clock.GetValue(), ::Settings::values.dyna_state.GetValue(),
         ::Settings::values.vsync_mode.GetValue(), ::Settings::values.async_presentation.GetValue(),
-        ::Settings::values.log_flush_line.GetValue()};
+        ::Settings::values.log_flush_line.GetValue(), ::Settings::values.max_anisotropy.GetValue(),
+        ::Settings::values.anti_aliasing.GetValue(), ::Settings::values.fsr_sharpening_slider.GetValue()};
     return d;
 }
 
@@ -126,6 +130,9 @@ inline void Restore() {
     ::Settings::values.vsync_mode.SetValue(d.vsync);
     ::Settings::values.async_presentation.SetValue(d.async_presentation);
     ::Settings::values.log_flush_line.SetValue(d.log_flush_line);
+    ::Settings::values.max_anisotropy.SetValue(d.anisotropy);
+    ::Settings::values.anti_aliasing.SetValue(d.anti_aliasing);
+    ::Settings::values.fsr_sharpening_slider.SetValue(d.fsr_sharpening);
     Performance::vulkan_cost_enabled = false;
     DevVulkan::present_frames = 0;
     DevVulkan::no_semaphore_latch = false;
@@ -248,6 +255,21 @@ inline bool ApplyEarly(const std::string& entry, bool& block_list_set) {
     // where the GPU, Vulkan and guest core threads are, in EDEN_HITCH lines. Read as the game starts.
     else if (entry.starts_with("tirones=") && Number(entry, 8, n) && n >= 300 && n <= 10000)
         SetVariable("EDEN_HITCH_MS", entry.c_str() + 8);
+    // Picture quality, read when the game's renderer starts. anisotropico=N (2, 4, 8 or 16; 0: what the
+    // game asks): textures seen at an angle (the track ahead) stay sharp. aa=off|fxaa|smaa: the
+    // anti-aliasing pass on the output (fxaa without the line). nitidez_fsr=N (0 to 200, 25 without the
+    // line): how much the AMD FSR filter (Settings > Video) sharpens what it scales up.
+    else if (entry.starts_with("anisotropico=") && Number(entry, 13, n) && (n == 0 || n == 2 || n == 4 || n == 8 || n == 16))
+        ::Settings::values.max_anisotropy.SetValue(n == 0 ? ::Settings::AnisotropyMode::Default
+                                                 : n == 2 ? ::Settings::AnisotropyMode::X2
+                                                 : n == 4 ? ::Settings::AnisotropyMode::X4
+                                                 : n == 8 ? ::Settings::AnisotropyMode::X8
+                                                          : ::Settings::AnisotropyMode::X16);
+    else if (entry == "aa=off") ::Settings::values.anti_aliasing.SetValue(::Settings::AntiAliasing::None);
+    else if (entry == "aa=fxaa") ::Settings::values.anti_aliasing.SetValue(::Settings::AntiAliasing::Fxaa);
+    else if (entry == "aa=smaa") ::Settings::values.anti_aliasing.SetValue(::Settings::AntiAliasing::Smaa);
+    else if (entry.starts_with("nitidez_fsr=") && Number(entry, 12, n) && n <= 200)
+        ::Settings::values.fsr_sharpening_slider.SetValue(static_cast<int>(n));
     // Presentation: how finished frames reach the TV, read when the game's renderer starts.
     else if (entry == "vsync=fifo") ::Settings::values.vsync_mode.SetValue(::Settings::VSyncMode::Fifo);
     else if (entry == "vsync=mailbox") ::Settings::values.vsync_mode.SetValue(::Settings::VSyncMode::Mailbox);
@@ -300,6 +322,9 @@ inline bool ApplyEarly(const std::string& entry, bool& block_list_set) {
     // swap_bloque=on: the swapper also writes to make the pool's largest block larger (juego_arriba=on), as
     // before; off without the line. Read as the game starts.
     else if (entry == "swap_bloque=on") SetVariable("EDEN_SWAP_FOR_BLOCK", "1");
+    // swap_intermedio=off: the swap file is written and read straight from the guest's slots, without the
+    // bounce buffers (src/guest_memory_service.inc). Read as the game starts.
+    else if (entry == "swap_intermedio=off") SetVariable("EDEN_SWAP_BOUNCE", "0");
     else if (entry.starts_with("swap_caliente=") && Number(entry, 14, n) && n <= 3600)
         SetVariable("EDEN_SWAP_HOT_SECONDS", entry.c_str() + 14);
     else if (entry.starts_with("reserva_juego=") && Number(entry, 14, n))
