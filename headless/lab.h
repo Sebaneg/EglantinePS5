@@ -228,6 +228,10 @@ inline bool ApplyEarly(const std::string& entry, bool& block_list_set) {
     // The thread a freeze report shows (crash_report.cpp FreezeWatch): GPU unless named here.
     else if (entry.starts_with("congelamiento_hilo=") && entry.size() > 19)
         SetVariable("EDEN_FREEZE_THREAD", entry.c_str() + 19);
+    // Hitch samples (crash_report.cpp HitchWatch): after N ms (300 to 10000) without a game frame,
+    // where the GPU, Vulkan and guest core threads are, in EDEN_HITCH lines. Read as the game starts.
+    else if (entry.starts_with("tirones=") && Number(entry, 8, n) && n >= 300 && n <= 10000)
+        SetVariable("EDEN_HITCH_MS", entry.c_str() + 8);
     // Presentation: how finished frames reach the TV, read when the game's renderer starts.
     else if (entry == "vsync=fifo") ::Settings::values.vsync_mode.SetValue(::Settings::VSyncMode::Fifo);
     else if (entry == "vsync=mailbox") ::Settings::values.vsync_mode.SetValue(::Settings::VSyncMode::Mailbox);

@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <chrono>
 #include <ctime>
 #include <fcntl.h>
 #include <fstream>
@@ -586,6 +587,136 @@ void FreezeWatch() {
     }
 }
 
+// Hitch samples (lab file tirones=N, EDEN_HITCH_MS=N): once the game has shown no frame for N ms,
+// where its main threads are, without stopping it. Mario Kart World's race went 2 to 6 s without
+// a frame with memory, swap and the GPU all quiet, and nothing said what it waited for. Each
+// sampled thread takes SIGUSR1 in turn; the handler writes where it was (the interrupted address
+// and the app's code addresses on its stack, as the crash report lists them) into hitch_line, and
+// the watch prints one EDEN_HITCH line per thread. Up to 4 rounds per stall (at N, 2N, 3N, 4N ms)
+// and 480 lines per game. tools/symbolize-crash.py reads the eboot+0x addresses.
+constexpr const char* kHitchThreads[] = {"GPU",       "VulkanWorker", "GPUFencingThread", "VulkanPresent",
+                                         "CPUCore_0", "CPUCore_1",    "CPUCore_2",        "CPUCore_3"};
+std::atomic<std::uintptr_t> hitch_target{0};
+std::atomic<bool> hitch_done{false};
+Text<768> hitch_line;
+std::uint64_t hitch_words[512];
+
+void HitchSignal(int, siginfo_t*, void* context) {
+    const int saved = errno;
+    if ((std::uintptr_t)pthread_self() != hitch_target.load(std::memory_order_acquire)) {
+        errno = saved;
+        return;
+    }
+    const Registers r = FromContext(context);
+    hitch_line.Clear();
+    hitch_line.Put(" at ");
+    hitch_line.Address(r.rip);
+    hitch_line.Put(" calls");
+    // As PutCalls, over 32 KiB of stack, at most 12 addresses.
+    unsigned found = 0;
+    std::uint64_t at = r.rsp & ~std::uint64_t{7};
+    for (std::size_t seen = 0; r.rsp != 0 && seen < 4096 && found < 12;) {
+        const std::size_t bytes = std::min<std::size_t>(4096 - (at & 4095), sizeof(hitch_words));
+        if (!Copy(reinterpret_cast<const void*>(at), hitch_words, bytes)) break;
+        for (std::size_t i = 0; i < bytes / 8 && found < 12; ++i) {
+            const std::uint64_t value = hitch_words[i];
+            if (!InCode(value) || value < CodeStart() + 8) continue;
+            unsigned char before[8];
+            if (Copy(reinterpret_cast<const void*>(value - 8), before, sizeof(before)) && !AfterCall(before)) continue;
+            hitch_line.Put(' ');
+            hitch_line.Address(value);
+            ++found;
+        }
+        at += bytes;
+        seen += bytes / 8;
+    }
+    if (found == 0) hitch_line.Put(" none");
+    hitch_done.store(true, std::memory_order_release);
+    errno = saved;
+}
+
+void HitchWatch() {
+    using Clock = std::chrono::steady_clock;
+    const auto ms_since = [](Clock::time_point from) {
+        return static_cast<unsigned long long>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - from).count());
+    };
+    bool handler = false, was_running = false, armed = false;
+    unsigned limit = 0, rounds = 0, stalls = 0, lines = 0;
+    unsigned long long last = 0;
+    Clock::time_point since{}, game_start{};
+    for (;;) {
+        Sleep(100000);
+        if (state.load(std::memory_order_acquire) != kIdle) return;
+        if (!game_running.load(std::memory_order_acquire)) {
+            was_running = false;
+            continue;
+        }
+        const unsigned long long frames = frames_shown.load(std::memory_order_relaxed);
+        if (!was_running) {
+            // Read as each game starts: the lab file sets it after this thread began.
+            was_running = true;
+            armed = false;
+            limit = 0;
+            if (const char* value = std::getenv("EDEN_HITCH_MS")) limit = static_cast<unsigned>(std::strtoul(value, nullptr, 10));
+            if (limit != 0 && limit < 300) limit = 300;
+            rounds = stalls = lines = 0;
+            last = frames;
+            since = game_start = Clock::now();
+            if (limit != 0) std::fprintf(stderr, "EDEN_HITCH watch on: samples after %u ms without a frame\n", limit);
+        }
+        if (limit == 0) continue;
+        if (frames != last) {
+            if (rounds != 0) {
+                std::fprintf(stderr, "EDEN_HITCH end n=%u lasted_ms=%llu\n", stalls, ms_since(since));
+                std::fflush(stderr);
+            }
+            last = frames;
+            since = Clock::now();
+            rounds = 0;
+            // Signals sent during a boot hung it (headless/stall_watchdog.h): only once the game
+            // has shown frames for 20 s.
+            armed = ms_since(game_start) >= 20000;
+            continue;
+        }
+        const unsigned long long still = ms_since(since);
+        if (!armed || rounds >= 4 || lines >= 480 || still < static_cast<unsigned long long>(limit) * (rounds + 1)) continue;
+        if (!handler) {
+            struct sigaction action {};
+            action.sa_sigaction = HitchSignal;
+            action.sa_flags = SA_SIGINFO | SA_RESTART;
+            sigemptyset(&action.sa_mask);
+            if (sigaction(SIGUSR1, &action, nullptr) != 0) {
+                std::fprintf(stderr, "EDEN_HITCH the signal handler was refused; the watch stops\n");
+                limit = 0;
+                continue;
+            }
+            handler = true;
+        }
+        if (rounds++ == 0) ++stalls;
+        for (const char* name : kHitchThreads) {
+            std::uintptr_t thread = 0;
+            for (const NamedThread& entry : named_threads)
+                if (!std::strcmp(entry.name, name)) thread = entry.thread.load(std::memory_order_acquire);
+            if (thread == 0) continue;
+            hitch_done.store(false, std::memory_order_relaxed);
+            hitch_target.store(thread, std::memory_order_release);
+            bool answered = false;
+            if (pthread_kill((pthread_t)thread, SIGUSR1) == 0) {
+                for (int i = 0; i < 300 && !answered; ++i) {
+                    Sleep(1000);
+                    answered = hitch_done.load(std::memory_order_acquire);
+                }
+            }
+            hitch_target.store(0, std::memory_order_release);
+            std::fprintf(stderr, "EDEN_HITCH n=%u still_ms=%llu frames=%llu %s%s\n", stalls, still, frames, name,
+                         answered ? hitch_line.data : " did not answer");
+            ++lines;
+        }
+        std::fflush(stderr);
+    }
+}
+
 void CopyText(char* target, std::size_t size, const char* text) noexcept {
     std::size_t length = 0;
     for (; text && text[length] && length + 1 < size; ++length) target[length] = text[length];
@@ -625,6 +756,7 @@ void Install(const std::string& logs_folder, const char* app_version, bool resta
     std::thread(Restarter).detach();
     std::thread(Flusher).detach();
     std::thread(FreezeWatch).detach();
+    std::thread(HitchWatch).detach();
     struct sigaction action {};
     action.sa_sigaction = Handle;
     action.sa_flags = SA_SIGINFO;
