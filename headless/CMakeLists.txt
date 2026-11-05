@@ -1848,10 +1848,12 @@ string(REPLACE "${page_heap_free_site}"
     page_heap_source "${page_heap_source}")
 string(PREPEND page_heap_source "#include <cstddef>\n#include <cstdint>\n#include \"core/device_memory.h\"\nnamespace Common { void GuestMemoryFreed(std::uint64_t offset, std::size_t bytes) noexcept; }\n")
 write_derived("${PORT_BUILD_DIR}/k_page_heap.cpp" "${page_heap_source}")
-get_target_property(pool_core_sources core SOURCES)
-list(REMOVE_ITEM pool_core_sources hle/kernel/k_memory_manager.cpp hle/kernel/k_page_heap.cpp)
-list(APPEND pool_core_sources "${PORT_BUILD_DIR}/k_memory_manager.cpp" "${PORT_BUILD_DIR}/k_page_heap.cpp")
-set_property(TARGET core PROPERTY SOURCES "${pool_core_sources}")
+# One list for both: kernel.cpp above and the pool's two files. Two lists set one after the other
+# left the second (kernel.cpp only) in place, and the pool's files were never built: freed guest
+# pages never went back (returns_free=0 in every run) and every page the kernel handed out was
+# filled with zeroes into memory of its own.
+list(REMOVE_ITEM core_sources hle/kernel/k_memory_manager.cpp hle/kernel/k_page_heap.cpp)
+list(APPEND core_sources "${PORT_BUILD_DIR}/k_memory_manager.cpp" "${PORT_BUILD_DIR}/k_page_heap.cpp")
 set_property(TARGET core PROPERTY SOURCES "${core_sources}")
 
 # Replace SDL audio with the optional native sink; the renderer stays null.
