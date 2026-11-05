@@ -36,6 +36,7 @@ pipeline_trace=on
 | `mesh=on` / `off` | Los dibujos con *mesh shaders*. Vienen **apagados** (`off`): con el controlador RADV cuelgan la GPU en Mario Kart World (también en PC con tarjetas AMD). Con `off` faltan algunas partes de la imagen. Cuenta desde el primer juego que se abre después de iniciar la app. |
 | `teselacion=off` | No dibuja lo que usa teselación (terreno, agua...). Faltarán partes de la escena; sirve para saber si la teselación cuelga la GPU. |
 | `dispersas=on` | Activa las texturas "dispersas" gigantes de Eglantine (vienen apagadas: colgaron la consola). |
+| `zonas_gpu_trozos=on` | Las zonas de texturas "solo GPU" de 1 GB o más (en Mario Kart World, las de 5,8 y 1,4 GB) usan los trozos de memoria que el juego pone en ellas, como las zonas dispersas, en vez de memoria aparte. En Mario Kart World eran 1,3 GB de más al empezar la intro. Se lee una vez por arranque de la app. En `eden_log.txt`: `GPU-only region at ... takes the game's tiles`. |
 | `sparse=off` | Apaga toda la memoria "dispersa" de la GPU (más drástico que lo anterior). |
 | `multirange=off` | Une los búferes de varios trozos a la manera antigua. |
 | `null_descriptor=off` | Sin descriptores nulos. |

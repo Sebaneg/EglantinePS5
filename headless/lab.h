@@ -159,6 +159,9 @@ inline bool ApplyEarly(const std::string& entry, bool& block_list_set) {
         DevVulkan::skip_programs.push_back(hash);
     } else if (entry == "dispersas=on") DevVulkan::sparse_tiles = true;
     else if (entry == "dispersas=off") DevVulkan::sparse_tiles = false;
+    // The game's texture pools in GPU-only regions take its tiles as sparse regions do
+    // (Eglantine patch 0005), instead of blocks of their own; read once per app start.
+    else if (entry == "zonas_gpu_trozos=on") SetVariable("EDEN_NX2_GPU_ONLY_TILES", "1");
     else if (entry == "sparse=off") DevVulkan::disable_sparse = true;
     else if (entry == "multirange=off") DevVulkan::disable_multi_range = true;
     else if (entry == "null_descriptor=off") DevVulkan::disable_null_descriptor = true;
