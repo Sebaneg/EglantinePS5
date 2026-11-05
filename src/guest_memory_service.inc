@@ -1252,6 +1252,16 @@ constexpr std::size_t ProbePerRound = 32, SwapPerRound = 32;
 constexpr std::size_t SwapBlockShortBytes = std::size_t{512} << 20, SwapBlockEnoughBytes = std::size_t{768} << 20;
 constexpr std::size_t SwapBlockStreakBytes = std::size_t{64} << 20, SwapBlockGain = std::size_t{16} << 20;
 constexpr std::uint32_t SwapBlockPauseSeconds = 10;
+// The SSD the file is on writes about 1 MB/s from the app (Mario Kart World: 1.6 to 1.9 s for one 2 MiB
+// slot), and while it writes, the reads back and even the system's direct memory queries wait (2.8 s
+// and 0.8 s). So the swapper writes gently: unless a write waits for a block or the pool has under
+// SwapUrgentBytes free, one slot a round, then it leaves the SSD alone at least as long as it took.
+// And it no longer writes only to make the largest block larger (juego_arriba=on, above): that race's
+// largest block stayed at 62 MiB while the swapper wrote 64 MiB every 10 s, an SSD busy all the time,
+// with 1.4 GB free in all. A refused graphics allocation still has the emergency (below). Lab file
+// swap_bloque=on (EDEN_SWAP_FOR_BLOCK=1) brings that back.
+constexpr std::size_t SwapUrgentBytes = std::size_t{512} << 20;
+std::atomic<bool> swap_for_block{false};
 
 std::size_t PoolLargestFree() noexcept {
     const std::int64_t total = sceKernelGetDirectMemorySize();
@@ -1283,6 +1293,7 @@ void SwapperLoop(SparseRange* range) {
     std::size_t hand = 0;
     std::size_t streak_bytes = 0, streak_largest = 0; // sent out for the largest block, and it then
     std::uint32_t paused_until = 0;
+    auto gentle_after = std::chrono::steady_clock::now(); // the SSD is left alone until then (gentle writes)
     std::unique_lock lock{scanner_mutex};
     while (!scanner_stop) {
         scanner_wake.wait_for(lock, std::chrono::milliseconds(250), [] { return scanner_stop; });
@@ -1322,13 +1333,15 @@ void SwapperLoop(SparseRange* range) {
         const bool high = guest_blocks_high.load(std::memory_order_relaxed);
         std::size_t largest = high ? PoolLargestFree() : ~std::size_t{0};
         const bool short_free = free < SwapShortBytes || wanted;
-        const bool short_block = high && largest < SwapBlockShortBytes;
+        const bool short_block = high && swap_for_block.load(std::memory_order_relaxed) && largest < SwapBlockShortBytes;
+        const bool urgent = wanted || free < SwapUrgentBytes;
+        const auto round_start = std::chrono::steady_clock::now();
         if (short_block && !short_free && largest >= streak_largest + SwapBlockGain) {
             streak_bytes = 0; // the block grew: what was sent out helps
             streak_largest = largest;
         }
         const bool paused = !short_free && now < paused_until;
-        if ((short_free || short_block) && !paused) {
+        if ((short_free || short_block) && !paused && (urgent || round_start >= gentle_after)) {
             const unsigned cold = swap_cold_seconds.load(std::memory_order_relaxed);
             std::vector<std::pair<std::int64_t, std::size_t>> candidates;
             for (std::size_t slot = 0; slot < slots; ++slot)
@@ -1337,7 +1350,7 @@ void SwapperLoop(SparseRange* range) {
             if (high) std::sort(candidates.begin(), candidates.end());
             std::size_t sent = 0;
             for (const auto& candidate : candidates) {
-                if (sent >= SwapPerRound) break;
+                if (sent >= (urgent ? SwapPerRound : 1)) break;
                 if (!short_free && largest >= SwapBlockEnoughBytes && free >= SwapEnoughBytes) break;
                 if (short_free && !short_block && free >= SwapEnoughBytes) break;
                 const std::size_t slot = candidate.second;
@@ -1349,6 +1362,7 @@ void SwapperLoop(SparseRange* range) {
                 free += SparseSlot;
                 if (high && sent % 8 == 0) largest = PoolLargestFree();
             }
+            if (!urgent && sent != 0) gentle_after = std::chrono::steady_clock::now() + (std::chrono::steady_clock::now() - round_start) + std::chrono::milliseconds(250);
             // Sent out for the largest block alone, and it did not grow: the blocks at the edge are
             // not the guest's (the graphics' own pieces are in the way). Wait a while.
             if (sent != 0 && !short_free) {
@@ -1529,6 +1543,8 @@ void ServiceStart(SparseRange& range) noexcept {
         const unsigned long seconds = cold != nullptr ? std::strtoul(cold, nullptr, 10) : 8;
         swap_cold_seconds.store(static_cast<unsigned>(std::clamp<unsigned long>(seconds, 2, 120)),
                                 std::memory_order_relaxed);
+        const char* for_block = std::getenv("EDEN_SWAP_FOR_BLOCK");
+        swap_for_block.store(for_block != nullptr && for_block[0] == '1', std::memory_order_relaxed);
         const char* hot = std::getenv("EDEN_SWAP_HOT_SECONDS");
         swap_hot_seconds.store(static_cast<std::uint32_t>(
                                    std::min<unsigned long>(hot != nullptr ? std::strtoul(hot, nullptr, 10) : 120, 3600)),

@@ -235,14 +235,14 @@ inline bool ApplyEarly(const std::string& entry, bool& block_list_set) {
     // medir=on: what is needed to tell where a slow game's time goes, at a small cost. The Vulkan
     // calls that can block, timed into EDEN_TIMELINE2 (performance.cpp); the GPU thread's time by
     // zone every 10 s in eden_log.txt (Eglantine's Nx2Profile, read late by patch 0013); the texture
-    // cache's numbers every 60 frames; hitch samples after 700 ms (tirones=N still sets its own); and
-    // eden_log.txt written line by line, so that its end is there when the app is closed.
+    // cache's numbers every 60 frames; and hitch samples after 700 ms (tirones=N still sets its own).
+    // Not eden_log.txt line by line: each line was then a write to the SSD on the GPU thread, which
+    // waited on it for seconds while the swap file was being written.
     else if (entry == "medir=on") {
         Performance::vulkan_cost_enabled = true;
         SetVariable("EDEN_NX2_GPU_PROFILE", "1");
         if (!std::getenv("EDEN_NX2_TC_LOG")) SetVariable("EDEN_NX2_TC_LOG", "60");
         if (!std::getenv("EDEN_HITCH_MS")) SetVariable("EDEN_HITCH_MS", "700");
-        ::Settings::values.log_flush_line.SetValue(true);
     }
     // Hitch samples (crash_report.cpp HitchWatch): after N ms (300 to 10000) without a game frame,
     // where the GPU, Vulkan and guest core threads are, in EDEN_HITCH lines. Read as the game starts.
@@ -297,6 +297,9 @@ inline bool ApplyEarly(const std::string& entry, bool& block_list_set) {
         SetVariable("EDEN_SWAP_COLD_SECONDS", entry.c_str() + 10);
     // swap_caliente=N: seconds a block read back from the swap file stays in memory (a quarter of it
     // for one touched on probation); 0 to 3600, 120 without the line, 0 as before. Read as the game starts.
+    // swap_bloque=on: the swapper also writes to make the pool's largest block larger (juego_arriba=on), as
+    // before; off without the line. Read as the game starts.
+    else if (entry == "swap_bloque=on") SetVariable("EDEN_SWAP_FOR_BLOCK", "1");
     else if (entry.starts_with("swap_caliente=") && Number(entry, 14, n) && n <= 3600)
         SetVariable("EDEN_SWAP_HOT_SECONDS", entry.c_str() + 14);
     else if (entry.starts_with("reserva_juego=") && Number(entry, 14, n))

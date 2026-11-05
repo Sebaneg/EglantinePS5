@@ -239,6 +239,8 @@ int main(int argc, char** argv) {
     // The slots read back stay out of the swapper's reach for this long (swap_caliente): off for the
     // cases below, which send the same slots out again and again; the last case turns it on.
     setenv("EDEN_SWAP_HOT_SECONDS", "0", 1);
+    // The first case sends slots out for the largest block alone (swap_bloque=on).
+    setenv("EDEN_SWAP_FOR_BLOCK", "1", 1);
     Common::SetGuestMemorySwap(true, argv[1], 0);
     Common::SetGuestBlocksHigh(true); // juego_arriba=on: blocks through eden_direct_high
     constexpr std::size_t Size = std::size_t{256} << 20, Slots = Size / Common::SparseSlot, Written = 64;
@@ -357,6 +359,28 @@ int main(int argc, char** argv) {
     for (std::size_t slot = 0; slot < Written; ++slot)
         if (slot != 3 && !Verify(base, slot, 50)) return 1;
     std::printf("emergency: %zu MiB out at once, every byte back as written\n", rescued >> 20);
+
+    // swap_bloque off (the default): a pool in pieces with plenty free in all writes nothing.
+    Common::swap_for_block.store(false);
+    Common::swap_hot_seconds.store(0);
+    const std::size_t out_before = Count(Slots, 5); // a slot an earlier case left in the file
+    mock::largest_override = std::int64_t{100} << 20; mock::free_override = std::int64_t{2} << 30;
+    std::this_thread::sleep_for(std::chrono::seconds(4));
+    if (Count(Slots, 5) != out_before) {
+        std::fprintf(stderr, "%zu slots out for the largest block alone\n", Count(Slots, 5) - out_before);
+        return 1;
+    }
+    // Short but not urgent (800 MiB free): one slot a round, then the SSD is left alone a while.
+    mock::free_override = std::int64_t{800} << 20;
+    std::this_thread::sleep_for(std::chrono::seconds(3));
+    {
+        const std::size_t out = Count(Slots, 5) - out_before;
+        if (out == 0 || out > 7) { std::fprintf(stderr, "%zu slots out in 3 s of gentle writes\n", out); return 1; }
+        std::printf("gentle: nothing out for the largest block alone; %zu slots out in 3 s when short, not urgent\n", out);
+    }
+    mock::largest_override = std::int64_t{3} << 30; mock::free_override = std::int64_t{3} << 30;
+    for (std::size_t slot = 0; slot < Written; ++slot)
+        if (slot != 3 && !Verify(base, slot, 50)) return 1;
 
     // Memory the game uses again stays in memory (swap_caliente=N): slots read back from the file
     // are not sent out again while the pool stays short, the others are; an emergency still takes them.
