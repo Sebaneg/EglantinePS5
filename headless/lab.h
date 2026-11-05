@@ -116,6 +116,8 @@ inline void Restore() {
     Common::SetGuestMemoryReserve(1024);
     Common::SetGuestMemorySwap(false, nullptr, 8);
     Common::SetGuestBlocksHigh(false);
+    Performance::pool_usable_metric = false;
+    Performance::short_memory_bytes = Performance::kShortMemory;
     ::Settings::values.vertex_input_dynamic_state.SetValue(d.vertex_input_dynamic);
     ::Settings::values.gpu_clock.SetValue(d.gpu_clock);
     ::Settings::values.dyna_state.SetValue(d.dyna_state);
@@ -254,6 +256,16 @@ inline bool ApplyEarly(const std::string& entry, bool& block_list_set) {
     // The game's memory nothing touched goes to a file on the SSD while memory is short, and comes
     // back when it is touched (src/guest_memory_service.inc, "Swap"). swap_frio=N: seconds a block
     // must go untouched first (2 to 120; 8 without the line). Both read as the game starts.
+    // Graphics memory: memoria_util=on measures what graphics can use as the pool's free stretches of
+    // 16 MiB or more together; memoria_corta=N (MiB, 128 to 1024; 1024 without it) is the mark under
+    // which the caches see memory short; margen_texturas=N (MiB, 0 to 3072; 3072 without it) is the
+    // most room the texture cache keeps free after images did not fit (Eglantine patch 0012).
+    else if (entry == "memoria_util=on" || entry == "memoria_util=off")
+        Performance::pool_usable_metric = entry.ends_with("on");
+    else if (entry.starts_with("memoria_corta=") && Number(entry, 14, n) && n >= 128 && n <= 1024)
+        Performance::short_memory_bytes = static_cast<std::size_t>(n) << 20;
+    else if (entry.starts_with("margen_texturas=") && Number(entry, 16, n) && n <= 3072)
+        SetVariable("EDEN_NX2_TC_PRESSURE_MAX_MIB", entry.c_str() + 16);
     // The game's 2 MiB blocks from the top of the pool, apart from the graphics' memory
     // (src/memory_pages.cpp, GuestDirect).
     else if (entry == "juego_arriba=on" || entry == "juego_arriba=off")

@@ -1,0 +1,50 @@
+diff --git a/src/video_core/texture_cache/texture_cache.h b/src/video_core/texture_cache/texture_cache.h
+--- a/src/video_core/texture_cache/texture_cache.h
++++ b/src/video_core/texture_cache/texture_cache.h
+@@ -8,6 +8,7 @@
+ 
+ #include <algorithm>
+ #include <numeric>
++#include <chrono>
+ #include <cstdlib>
+ #include <limits>
+ #include <map>
+@@ -315,16 +316,35 @@
+                 // thresholds sit too high for this card and driver: leave more room until the
+                 // pressure has been gone for a while.
+                 if (native_thresholds_applied) {
++                    // The margin shrinks by time, not by frames: counted in frames (128 MiB every
++                    // 600), a game slowed to 2 frames a second by the collector kept its 3 GiB for
++                    // five minutes and the collector at its hardest the whole time (title 1's race
++                    // at 1 to 5 frames a second). 256 MiB every EDEN_NX2_TC_PRESSURE_DECAY_MS (5 s)
++                    // without a new event; at most EDEN_NX2_TC_PRESSURE_MAX_MIB (3072; lab file
++                    // margen_texturas=N).
++                    static const u64 pressure_max = [] {
++                        const char* value = std::getenv("EDEN_NX2_TC_PRESSURE_MAX_MIB");
++                        return (value != nullptr ? std::strtoull(value, nullptr, 10) : 3072ULL) << 20;
++                    }();
++                    static const auto pressure_decay = std::chrono::milliseconds([] {
++                        const char* value = std::getenv("EDEN_NX2_TC_PRESSURE_DECAY_MS");
++                        const unsigned long long ms = value != nullptr ? std::strtoull(value, nullptr, 10) : 5000;
++                        return static_cast<long long>(ms < 500 ? 500 : ms);
++                    }());
++                    static auto pressure_quiet_since = std::chrono::steady_clock::now();
++                    const auto pressure_now = std::chrono::steady_clock::now();
+                     const u32 events = runtime.MemoryPressureEvents();
+                     if (events != seen_pressure_events) {
+                         seen_pressure_events = events;
+-                        pressure_margin = (std::min)(pressure_margin + 512_MiB, 3_GiB);
++                        pressure_margin = (std::min)(pressure_margin + 512_MiB, pressure_max);
+                         pressure_quiet_frames = 0;
++                        pressure_quiet_since = pressure_now;
+                         budget_check_frames = 0; // thresholds are recomputed below
+                         LOG_WARNING(HW_GPU, "Out of device memory: keeping {} MiB more free",
+                                     pressure_margin >> 20);
+-                    } else if (pressure_margin != 0 && ++pressure_quiet_frames % 600 == 0) {
+-                        pressure_margin -= (std::min)(pressure_margin, 128_MiB);
++                    } else if (pressure_margin != 0 && pressure_now - pressure_quiet_since >= pressure_decay) {
++                        pressure_margin -= (std::min)(pressure_margin, 256_MiB);
++                        pressure_quiet_since = pressure_now;
+                         budget_check_frames = 0;
+                     }
+                 }

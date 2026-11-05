@@ -302,6 +302,14 @@ inline std::atomic<unsigned> frame_gap_worst_us{0};
 // 486 MiB (a texture array of 121 layers, decoded before it is uploaded). With less here the collector
 // let the pool run down to 620 MiB in one block, and that request ended the session.
 inline constexpr std::size_t kShortMemory = std::size_t{1} << 30;
+// The lab file's memoria_corta=N: the mark under which the pool is short (kShortMemory without it).
+inline std::atomic<std::size_t> short_memory_bytes{kShortMemory};
+// The lab file's memoria_util=on: what graphics can use is measured as the pool's free stretches of
+// 16 MiB or more together, not its largest one alone. With the guest's blocks at the top
+// (juego_arriba=on) the largest stretch is the gap between them and the graphics: Mario Kart World's
+// race had 240 MiB there and more in other stretches, under 1 GiB for minutes, and the caches evicted
+// at their hardest the whole time while no graphics allocation needed more than 96 MiB.
+inline std::atomic<bool> pool_usable_metric{false};
 // The guest's headroom in the pool: 1 GiB that a game's own memory may take at once while the graphics
 // caches give memory back. The memory service holds it as blocks of its own (src/guest_memory_service.inc).
 inline constexpr std::size_t kGuestReserve = std::size_t{1} << 30;
@@ -318,7 +326,7 @@ inline PoolView ViewOfPool(bool known, std::size_t largest, std::size_t held, st
     if (!known) return {0, true};
     const std::size_t headroom = target == 0 ? kGuestReserve : held < target ? target - held : 0;
     const std::size_t free = largest > headroom ? largest - headroom : 0;
-    return {free, free < kShortMemory || (target != 0 && held < target / 2)};
+    return {free, free < short_memory_bytes.load(std::memory_order_relaxed) || (target != 0 && held < target / 2)};
 }
 // Development: the texture cache reports its memory use and marks every 300 frames.
 inline std::atomic<bool> texture_budget_log{false};

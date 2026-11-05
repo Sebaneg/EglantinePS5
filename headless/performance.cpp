@@ -443,7 +443,31 @@ static void RefreshFreeMemory() {
     const bool known = total > 0 && sceKernelAvailableDirectMemorySize(0, total, 0x4000, &start, &largest) == 0;
     std::size_t held = 0, target = 0;
     if (eden_guest_memory_reserve) eden_guest_memory_reserve(&held, &target);
-    const PoolView view = ViewOfPool(known, largest, held, target);
+    // memoria_util=on: the free stretches of 16 MiB or more together (looked through every 500 ms).
+    std::size_t measured = largest;
+    if (known && pool_usable_metric.load(std::memory_order_relaxed)) {
+        static std::atomic<long long> usable_ns{0};
+        static std::atomic<std::size_t> usable{0};
+        if (now - usable_ns.load(std::memory_order_relaxed) >= 500'000'000) {
+            usable_ns.store(now, std::memory_order_relaxed);
+            constexpr std::int64_t Stretch = std::int64_t{16} << 20;
+            std::size_t sum = 0;
+            std::int64_t offset = 0, previous_end = 0;
+            DirectMemoryRegion region{};
+            for (unsigned regions = 0; regions < 100000 && offset < total &&
+                                       sceKernelDirectMemoryQuery(offset, 1, &region, sizeof(region)) == 0 &&
+                                       region.end > offset;
+                 ++regions) {
+                if (region.start - previous_end >= Stretch) sum += static_cast<std::size_t>(region.start - previous_end);
+                previous_end = region.end;
+                offset = region.end;
+            }
+            if (total - previous_end >= Stretch) sum += static_cast<std::size_t>(total - previous_end);
+            usable.store(sum, std::memory_order_relaxed);
+        }
+        measured = (std::max)(largest, usable.load(std::memory_order_relaxed));
+    }
+    const PoolView view = ViewOfPool(known, measured, held, target);
     largest_free_block.store(known ? (view.free != 0 ? view.free : 1) : 0, std::memory_order_relaxed);
     graphics_memory_short.store(view.short_memory, std::memory_order_relaxed);
     // The pool, the guest's memory and the heap in stderr.log every 20 s, to see what holds it.
