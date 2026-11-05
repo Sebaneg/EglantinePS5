@@ -34,6 +34,7 @@ void SetGuestMemoryService(bool on, bool scan, bool dedup) noexcept;
 void SetGuestMemoryFine(bool on) noexcept;
 void SetGuestMemoryReserve(std::size_t mib) noexcept;
 void SetGuestMemorySwap(bool on, const char* path, unsigned cold_seconds) noexcept;
+void SetGuestBlocksHigh(bool on) noexcept;
 } // namespace Common
 
 namespace Eden::Lab {
@@ -114,6 +115,7 @@ inline void Restore() {
     ::Settings::values.astc_recompression.SetValue(d.astc_recompression);
     Common::SetGuestMemoryReserve(1024);
     Common::SetGuestMemorySwap(false, nullptr, 8);
+    Common::SetGuestBlocksHigh(false);
     ::Settings::values.vertex_input_dynamic_state.SetValue(d.vertex_input_dynamic);
     ::Settings::values.gpu_clock.SetValue(d.gpu_clock);
     ::Settings::values.dyna_state.SetValue(d.dyna_state);
@@ -252,6 +254,10 @@ inline bool ApplyEarly(const std::string& entry, bool& block_list_set) {
     // The game's memory nothing touched goes to a file on the SSD while memory is short, and comes
     // back when it is touched (src/guest_memory_service.inc, "Swap"). swap_frio=N: seconds a block
     // must go untouched first (2 to 120; 8 without the line). Both read as the game starts.
+    // The game's 2 MiB blocks from the top of the pool, apart from the graphics' memory
+    // (src/memory_pages.cpp, GuestDirect).
+    else if (entry == "juego_arriba=on" || entry == "juego_arriba=off")
+        Common::SetGuestBlocksHigh(entry.ends_with("on"));
     else if (entry == "swap=on" || entry == "swap=off") {
         static const std::string path = std::string{Eden::kDataDir} + "/swap_juego.bin";
         Common::SetGuestMemorySwap(entry.ends_with("on"), path.c_str(), 0);

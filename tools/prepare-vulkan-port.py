@@ -586,11 +586,13 @@ adapt('src/video_core/vulkan_common/vulkan_memory_allocator.cpp', 'vulkan_memory
 # 480 MiB free. No Finish() when releasing: a buffer handed out earlier may not have its copy recorded.
 adapt('src/video_core/renderer_vulkan/vk_staging_buffer_pool.cpp', 'vulkan_staging_buffer_pool.cpp', [
     ('#include "video_core/vulkan_common/vulkan_wrapper.h"\n',
-     '#include "video_core/vulkan_common/vulkan_wrapper.h"\n#include <atomic>\n#include <cstdio>\n#include <cstdlib>\n'
+     '#include "video_core/vulkan_common/vulkan_wrapper.h"\n#include <atomic>\n#include <chrono>\n#include <cstdio>\n#include <cstdlib>\n'
      '#include "performance.h"\n#include "staging_buffers.h"\n'),
     # While the pool the CPU shares with the GPU is short, every kept buffer the GPU is done with
-    # goes at each frame, not only when a buffer is refused: Mario Kart World held 218 MiB of them
-    # as its race loaded, given back only after the allocation that ended the session had failed.
+    # goes, not only when a buffer is refused: Mario Kart World held 218 MiB of them as its race
+    # loaded, given back only after the allocation that ended the session had failed. Every 2 s
+    # at most: at every frame, a pool short for minutes made and dropped the frame's buffers
+    # again at each one (1024 times in a run that fell to 1 to 5 frames a second).
     # EDEN_STAGING_KEEP_WHEN_SHORT=1 keeps them as before.
     ('    ReleaseCache(MemoryUsage::Download);\n}\n',
      '    ReleaseCache(MemoryUsage::Download);\n'
@@ -598,7 +600,11 @@ adapt('src/video_core/renderer_vulkan/vk_staging_buffer_pool.cpp', 'vulkan_stagi
      '        const char* value = std::getenv("EDEN_STAGING_KEEP_WHEN_SHORT");\n'
      '        return value != nullptr && value[0] == \'1\';\n'
      '    }();\n'
-     '    if (!keep_when_short && ::Eden::Performance::graphics_memory_short.load(std::memory_order_relaxed)) {\n'
+     '    static auto last_release = std::chrono::steady_clock::time_point{};\n'
+     '    const auto release_now = std::chrono::steady_clock::now();\n'
+     '    if (!keep_when_short && ::Eden::Performance::graphics_memory_short.load(std::memory_order_relaxed) &&\n'
+     '        release_now - last_release >= std::chrono::seconds(2)) {\n'
+     '        last_release = release_now;\n'
      '        const auto idle = [this](const StagingBuffer& entry) {\n'
      '            return !entry.deferred && scheduler.IsFree(entry.tick);\n'
      '        };\n'

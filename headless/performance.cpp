@@ -19,6 +19,7 @@
 #include <sched.h>
 #include <semaphore>
 #include <stdexcept>
+#include <chrono>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -349,6 +350,9 @@ extern "C" void eden_heap_usage(std::size_t* held, std::size_t* in_use, std::siz
 extern "C" void eden_heap_detail(unsigned* arenas, std::size_t* arena_bytes, std::size_t* space_blocks,
                                  std::size_t* space_free) __attribute__((weak));
 extern "C" unsigned eden_guest_memory_wanted(void) __attribute__((weak));
+extern "C" void eden_guest_memory_counters(std::uint64_t* promotions, std::uint64_t* waits, std::uint64_t* swap_outs,
+                                           std::uint64_t* swap_ins, std::uint64_t* probe_hits,
+                                           std::size_t* swapped_bytes) noexcept;
 extern "C" void eden_guest_memory_reserve(std::size_t* held, std::size_t* target) __attribute__((weak));
 #ifdef PS5_NATIVE
 extern "C" std::int64_t sceKernelGetDirectMemorySize();
@@ -360,10 +364,74 @@ extern "C" std::int32_t sceKernelDirectMemoryQuery(std::int64_t, int, DirectMemo
 #endif
 
 #ifdef PS5_NATIVE
+// EDEN_TIMELINE: one line in stderr.log every 2 s with what decides how a game runs, side by side,
+// so that the moment it slows down shows what changed: the frames shown and the longest wait for one,
+// the pool (free in all, its largest block, whether the caches see it short), the guest's memory,
+// the heap, the JIT's code and the rest (the GPU's), and what the guest's memory did in those 2 s
+// (slots written for the first time, waits for a slot, slots sent to the swap file and read back,
+// probation slots touched again). Its own thread: it goes on while a game hardly draws a frame.
+static void TimelineLoop() {
+    const auto started = std::chrono::steady_clock::now();
+    unsigned last_frames = Eden::Performance::frames_shown.load(std::memory_order_relaxed);
+    std::uint64_t last[5] = {};
+    std::size_t swapped = 0;
+    eden_guest_memory_counters(&last[0], &last[1], &last[2], &last[3], &last[4], &swapped);
+    auto last_time = started;
+    for (;;) {
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+        const auto now = std::chrono::steady_clock::now();
+        const double seconds = std::chrono::duration<double>(now - last_time).count();
+        last_time = now;
+        const unsigned frames = Eden::Performance::frames_shown.load(std::memory_order_relaxed);
+        const unsigned worst_us = Eden::Performance::frame_gap_worst_us.exchange(0, std::memory_order_relaxed);
+        std::uint64_t counts[5] = {};
+        eden_guest_memory_counters(&counts[0], &counts[1], &counts[2], &counts[3], &counts[4], &swapped);
+        const std::int64_t total = sceKernelGetDirectMemorySize();
+        std::int64_t start = 0;
+        std::size_t largest = 0;
+        if (total > 0) (void)sceKernelAvailableDirectMemorySize(0, total, 0x4000, &start, &largest);
+        std::size_t taken = 0;
+        if (total > 0) {
+            DirectMemoryRegion region{};
+            std::int64_t offset = 0;
+            for (unsigned regions = 0; regions < 100000 && offset < total &&
+                                       sceKernelDirectMemoryQuery(offset, 1, &region, sizeof(region)) == 0 &&
+                                       region.end > offset;
+                 ++regions) {
+                taken += static_cast<std::size_t>(region.end - region.start);
+                offset = region.end;
+            }
+        }
+        std::size_t guest_span = 0, guest_held = 0, heap_held = 0, code_span = 0, code_held = 0, table_span = 0,
+                    table_held = 0;
+        ::Common::GuestMemoryUsage(&guest_span, &guest_held);
+        if (eden_heap_usage) eden_heap_usage(&heap_held, nullptr, nullptr);
+        ::Common::CodeRangeUsage(&code_span, &code_held);
+        ::Common::SparseUsage(&table_span, &table_held);
+        const std::size_t known = guest_held + heap_held + code_held + table_held;
+        std::fprintf(stderr,
+                     "EDEN_TIMELINE t=%.0f fps=%.1f worst_ms=%u free=%lld largest=%zu short=%d guest=%zu heap=%zu "
+                     "jit=%zu gpu_rest=%zu swapped=%zu written=+%llu waits=+%llu swap_out=+%llu swap_in=+%llu "
+                     "probe_hits=+%llu (MiB)\n",
+                     std::chrono::duration<double>(now - started).count(),
+                     seconds > 0 ? (frames - last_frames) / seconds : 0.0, worst_us / 1000,
+                     static_cast<long long>((total - static_cast<std::int64_t>(taken)) >> 20), largest >> 20,
+                     int(graphics_memory_short.load(std::memory_order_relaxed)), guest_held >> 20, heap_held >> 20,
+                     code_held >> 20, (taken > known ? taken - known : 0) >> 20, swapped >> 20,
+                     (unsigned long long)(counts[0] - last[0]), (unsigned long long)(counts[1] - last[1]),
+                     (unsigned long long)(counts[2] - last[2]), (unsigned long long)(counts[3] - last[3]),
+                     (unsigned long long)(counts[4] - last[4]));
+        last_frames = frames;
+        for (int i = 0; i < 5; ++i) last[i] = counts[i];
+    }
+}
+
 // The largest free block of direct memory is what the next graphics allocation needs. Looked at
 // again every 100 ms; called on the GPU thread by the texture collector (KeepDirtyTextures).
 static std::atomic<unsigned long long> largest_free_block{0};
 static void RefreshFreeMemory() {
+    static std::once_flag timeline_started;
+    std::call_once(timeline_started, [] { std::thread(TimelineLoop).detach(); });
     static std::atomic<long long> checked_ns{0};
     const long long now = NowNs();
     if (const long long last = checked_ns.load(std::memory_order_relaxed); last != 0 && now - last < 100'000'000)

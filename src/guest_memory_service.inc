@@ -143,7 +143,7 @@ void FillReserve(std::size_t blocks = ReserveBlocks) noexcept {
         reserve_lock.clear(std::memory_order_release);
         if (full) return;
         std::int64_t physical = -1;
-        if (!ZeroedBlock(&physical)) return;
+        if (!ZeroedGuestBlock(&physical)) return;
         Spin(reserve_lock);
         const std::size_t count = reserve_count.load(std::memory_order_relaxed);
         if (count < blocks) {
@@ -205,7 +205,7 @@ bool PromoteZero(SparseRange& range, std::size_t slot) noexcept {
     const std::uintptr_t at = SlotAddress(range, slot);
 #ifdef PS5_NATIVE
     std::int64_t physical = -1;
-    if (!ZeroedBlock(&physical) && !ReserveBlock(&physical)) return false;
+    if (!ZeroedGuestBlock(&physical) && !ReserveBlock(&physical)) return false;
     if (!MapSlot(at, PROT_READ | PROT_WRITE, physical)) {
         (void)sceKernelReleaseDirectMemory(physical, SparseSlot);
         return false;
@@ -235,7 +235,7 @@ bool PromoteShared(SparseRange& range, std::size_t slot) noexcept {
     shared_lock.clear(std::memory_order_release);
     if (last) return mprotect(reinterpret_cast<void*>(at), SparseSlot, PROT_READ | PROT_WRITE) == 0;
     std::int64_t physical = -1;
-    if (eden_direct_low(SparseSlot, SparseSlot, 12, &physical) != 0 && !ReserveBlock(&physical)) return false;
+    if (GuestDirect(SparseSlot, SparseSlot, &physical) != 0 && !ReserveBlock(&physical)) return false;
     void* view = reinterpret_cast<void*>(cpu_mapping_hint);
     if (sceKernelMapDirectMemory(&view, SparseSlot, PROT_READ | PROT_WRITE, 0, physical, SparseSlot) != 0) {
         (void)sceKernelReleaseDirectMemory(physical, SparseSlot);
@@ -334,7 +334,7 @@ bool PromoteFine(SparseRange& range, std::size_t slot) noexcept {
     const std::size_t kept = FineKept(range, slot);
 #ifdef PS5_NATIVE
     std::int64_t physical = -1;
-    if (eden_direct_low(SparseSlot, SparseSlot, 12, &physical) != 0 && !ReserveBlock(&physical)) return false;
+    if (GuestDirect(SparseSlot, SparseSlot, &physical) != 0 && !ReserveBlock(&physical)) return false;
     void* view = reinterpret_cast<void*>(cpu_mapping_hint);
     if (sceKernelMapDirectMemory(&view, SparseSlot, PROT_READ | PROT_WRITE, 0, physical, SparseSlot) != 0) {
         (void)sceKernelReleaseDirectMemory(physical, SparseSlot);
@@ -507,7 +507,7 @@ bool SwapOut(SparseRange& range, std::size_t slot) noexcept {
 bool SwapIn(SparseRange& range, std::size_t slot) noexcept {
     const std::uintptr_t at = SlotAddress(range, slot);
     std::int64_t physical = -1;
-    if (eden_direct_low(SparseSlot, SparseSlot, 12, &physical) != 0 && !ReserveBlock(&physical)) return false;
+    if (GuestDirect(SparseSlot, SparseSlot, &physical) != 0 && !ReserveBlock(&physical)) return false;
     void* view = reinterpret_cast<void*>(cpu_mapping_hint);
     if (sceKernelMapDirectMemory(&view, SparseSlot, PROT_READ | PROT_WRITE, 0, physical, SparseSlot) != 0) {
         (void)sceKernelReleaseDirectMemory(physical, SparseSlot);
@@ -1192,14 +1192,16 @@ void ScannerLoop(SparseRange* range) {
 }
 
 #ifdef PS5_NATIVE
-// The swapper: every 250 ms, while the pool's largest free block is under 2 GiB, it puts the next
-// Own slots of a clock on probation; while it is under 768 MiB (or a write waits for a block), it
-// sends slots nobody touched for swap_cold_seconds to the file, up to 64 MiB a round, until the
-// largest block is back over 1.25 GiB.
+// The swapper: every 250 ms, while the pool has less than 2.5 GiB free in all, it puts the next Own
+// slots of a clock on probation; while it has less than 1 GiB free (or a write waits for a block),
+// it sends slots nobody touched for swap_cold_seconds to the file, up to 64 MiB a round, until
+// 1.5 GiB are free. What is free in all, not the largest free block: a slot sent out frees 2 MiB
+// where the slot was, which never made a larger block, and Mario Kart World's first swapping run
+// sent 1113 slots out (1.6 GB free in all) while the largest block stayed at 214 MiB.
 std::thread swapper;
 std::atomic<unsigned> swap_cold_seconds{8};
-constexpr std::size_t SwapProbeBytes = std::size_t{2048} << 20, SwapShortBytes = std::size_t{768} << 20;
-constexpr std::size_t SwapEnoughBytes = std::size_t{1280} << 20;
+constexpr std::size_t SwapProbeBytes = std::size_t{2560} << 20, SwapShortBytes = std::size_t{1024} << 20;
+constexpr std::size_t SwapEnoughBytes = std::size_t{1536} << 20, SwapQuietBytes = std::size_t{3072} << 20;
 constexpr std::size_t ProbePerRound = 64, SwapPerRound = 32;
 
 std::size_t PoolLargestFree() noexcept {
@@ -1208,6 +1210,20 @@ std::size_t PoolLargestFree() noexcept {
     std::size_t largest = 0;
     if (total <= 0 || sceKernelAvailableDirectMemorySize(0, total, 0x4000, &start, &largest) != 0) return ~std::size_t{0};
     return largest;
+}
+// What the pool has free in all: its size less every region taken.
+std::size_t PoolFree() noexcept {
+    const std::int64_t total = sceKernelGetDirectMemorySize();
+    if (total <= 0) return ~std::size_t{0};
+    std::int64_t taken = 0, offset = 0;
+    EdenDirectRegion region{};
+    for (unsigned regions = 0; regions < 100000 && offset < total &&
+                               sceKernelDirectMemoryQuery(offset, 1, &region, sizeof(region)) == 0 && region.end > offset;
+         ++regions) {
+        taken += region.end - region.start;
+        offset = region.end;
+    }
+    return taken < total ? static_cast<std::size_t>(total - taken) : 0;
 }
 
 void SwapperLoop(SparseRange* range) {
@@ -1221,9 +1237,10 @@ void SwapperLoop(SparseRange* range) {
         lock.unlock();
         const auto now = static_cast<std::uint32_t>(
             std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - started).count());
-        std::size_t largest = PoolLargestFree();
         const bool wanted = memory_waiters.load(std::memory_order_acquire) != 0;
-        if (largest < SwapProbeBytes || wanted) {
+        // The whole pool is looked through only when its largest block says it may be short.
+        std::size_t free = PoolLargestFree() >= SwapQuietBytes && !wanted ? ~std::size_t{0} : PoolFree();
+        if (free < SwapProbeBytes || wanted) {
             for (std::size_t probed = 0, looked = 0; probed < ProbePerRound && looked < slots; ++looked) {
                 const std::size_t slot = hand;
                 hand = (hand + 1) % slots;
@@ -1242,14 +1259,17 @@ void SwapperLoop(SparseRange* range) {
         }
         const unsigned cold = swap_cold_seconds.load(std::memory_order_relaxed);
         for (std::size_t slot = 0, sent = 0; slot < slots && sent < SwapPerRound &&
-                                             (largest < SwapEnoughBytes || wanted) &&
-                                             (largest < SwapShortBytes || wanted || sent != 0);
+                                             (free < SwapEnoughBytes || wanted) &&
+                                             (free < SwapShortBytes || wanted || sent != 0);
              ++slot) {
             if (SlotState(*range, slot) != SlotProbe || now - range->probe_at[slot] < cold) continue;
             LockSlot(*range, slot);
             const bool out = SlotState(*range, slot) == SlotProbe && SwapOut(*range, slot);
             UnlockSlot(*range, slot, out ? SlotSwapped : SlotState(*range, slot));
-            if (out && ++sent % 8 == 0) largest = PoolLargestFree();
+            if (out) {
+                ++sent;
+                free += SparseSlot;
+            }
         }
         lock.lock();
     }
@@ -1394,6 +1414,25 @@ void ServiceStart(SparseRange& range) noexcept {
     scanner = std::thread(ScannerLoop, &range);
     bool swapping = false;
 #ifdef PS5_NATIVE
+    // juego_arriba=on checked on this console before the first block: one 2 MiB block from the top
+    // and one where the system puts it. The top one must be the higher, in the upper half of the
+    // pool; anything else turns the switch off for the session, so it can only help or do nothing.
+    if (guest_blocks_high.load(std::memory_order_relaxed)) {
+        const std::int64_t total = sceKernelGetDirectMemorySize();
+        std::int64_t high = -1, low = -1;
+        const bool took_high = eden_direct_high(SparseSlot, SparseSlot, 12, &high) == 0;
+        const bool took_low = eden_direct_low(SparseSlot, SparseSlot, 12, &low) == 0;
+        const bool placed = took_high && took_low && high > low && total > 0 && high >= total / 2;
+        if (took_high) (void)sceKernelReleaseDirectMemory(high, SparseSlot);
+        if (took_low) (void)sceKernelReleaseDirectMemory(low, SparseSlot);
+        if (!placed) guest_blocks_high.store(false, std::memory_order_relaxed);
+        char text[192];
+        const int written = std::snprintf(text, sizeof(text),
+                                          "EDEN_GUEST_PLACEMENT top=%lld MiB bottom=%lld MiB of %lld MiB: %s\n",
+                                          (long long)(high >> 20), (long long)(low >> 20), (long long)(total >> 20),
+                                          placed ? "the game's blocks from the top" : "off, the top is not apart");
+        if (written > 0) Report(text);
+    }
     keeper = std::thread(ReserveKeeper);
     if (swap_requested.load(std::memory_order_relaxed) && swap_path[0] != 0) {
         const char* cold = std::getenv("EDEN_SWAP_COLD_SECONDS");
@@ -1500,6 +1539,20 @@ void SetGuestMemoryFine(bool on) noexcept {
     fine_requested.store(on, std::memory_order_relaxed);
 }
 
+// What the guest's memory did so far, for EDEN_TIMELINE (headless/performance.cpp): slots written
+// for the first time, faults that waited for a slot's lock, slots sent to the swap file and read
+// back, probation slots touched again, and the bytes in the file now.
+extern "C" void eden_guest_memory_counters(std::uint64_t* promotions, std::uint64_t* waits, std::uint64_t* swap_outs,
+                                           std::uint64_t* swap_ins, std::uint64_t* probe_hits,
+                                           std::size_t* swapped_bytes) noexcept {
+    *promotions = counters.promotions.load(std::memory_order_relaxed);
+    *waits = counters.waits.load(std::memory_order_relaxed);
+    *swap_outs = counters.swap_outs.load(std::memory_order_relaxed);
+    *swap_ins = counters.swap_ins.load(std::memory_order_relaxed);
+    *probe_hits = counters.probe_hits.load(std::memory_order_relaxed);
+    *swapped_bytes = swap_held.load(std::memory_order_relaxed) * SparseSlot;
+}
+
 // The lab file's swap=on (and swap_frio=seconds): slots of the guest's memory nothing touched go to
 // `path` while the pool is short (above, "Swap"). Set before the game starts; off: path empty.
 void SetGuestMemorySwap(bool on, const char* path, unsigned cold_seconds) noexcept {
@@ -1510,6 +1563,16 @@ void SetGuestMemorySwap(bool on, const char* path, unsigned cold_seconds) noexce
     if (cold_seconds != 0) swap_cold_seconds.store(std::clamp(cold_seconds, 2u, 120u), std::memory_order_relaxed);
 #else
     (void)cold_seconds;
+#endif
+}
+
+// The lab file's juego_arriba=on: the guest's blocks from the top of the pool (GuestDirect). Set before
+// the game starts.
+void SetGuestBlocksHigh(bool on) noexcept {
+#ifdef PS5_NATIVE
+    guest_blocks_high.store(on, std::memory_order_relaxed);
+#else
+    (void)on; // the host places nothing
 #endif
 }
 

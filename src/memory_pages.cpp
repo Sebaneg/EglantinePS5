@@ -56,6 +56,9 @@ std::int32_t sceKernelReserveVirtualRange(void**, std::size_t, int, std::size_t)
 std::int32_t sceKernelEnableDmemAliasing();
 std::int32_t sceKernelAvailableDirectMemorySize(std::int64_t, std::int64_t, std::size_t, std::int64_t*,
                                                 std::size_t*);
+// The allocated region at or after an offset (flag 1: find the next one).
+struct EdenDirectRegion { std::int64_t start; std::int64_t end; std::int32_t type; };
+std::int32_t sceKernelDirectMemoryQuery(std::int64_t, int, EdenDirectRegion*, std::size_t);
 int sceKernelDebugOutText(int, const char*);
 }
 #endif
@@ -326,9 +329,23 @@ std::int64_t zero_block = -1;
 // mapped with 7142 mappings, as at ~31.8 GiB with 48844. Set by the start-up check (LazyZeroWorks).
 bool lazy_zero = false;
 
-// `bytes` of direct memory, zeroed through a mapping of its own that is gone again.
-bool ZeroedSpan(std::int64_t* physical, std::size_t bytes) {
-    if (eden_direct_low(bytes, SparseSlot, 12, physical) != 0)
+// The lab file's juego_arriba=on: the guest's 2 MiB blocks are taken from the top of the pool down
+// (src/direct_memory.c, eden_direct_high), not where the system puts them. Taken from the bottom,
+// they came and went between the graphics' memory: with Mario Kart World's race loading, 1.6 GB
+// of them went to the swap file and left 1.5 GB free in the pool, but in 2 MiB holes between
+// graphics blocks, the largest free block at 214 MiB, and the texture cache evicted and uploaded
+// at every frame for minutes (the game ran at 1 to 5 frames a second). At the top, the guest's
+// holes stay among its own blocks, and the graphics keep the bottom of the pool in one piece.
+std::atomic<bool> guest_blocks_high{false};
+int GuestDirect(std::size_t bytes, std::size_t alignment, std::int64_t* physical) {
+    return guest_blocks_high.load(std::memory_order_relaxed) ? eden_direct_high(bytes, alignment, 12, physical)
+                                                             : eden_direct_low(bytes, alignment, 12, physical);
+}
+
+// `bytes` of direct memory, zeroed through a mapping of its own that is gone again. `guest`: a block
+// of the guest's memory (GuestDirect).
+bool ZeroedSpan(std::int64_t* physical, std::size_t bytes, bool guest = false) {
+    if ((guest ? GuestDirect(bytes, SparseSlot, physical) : eden_direct_low(bytes, SparseSlot, 12, physical)) != 0)
         return false;
     void* view = reinterpret_cast<void*>(cpu_mapping_hint);
     if (sceKernelMapDirectMemory(&view, bytes, PROT_READ | PROT_WRITE, 0, *physical, SparseSlot) != 0) {
@@ -342,6 +359,10 @@ bool ZeroedSpan(std::int64_t* physical, std::size_t bytes) {
 // A 2 MiB block of direct memory, zeroed.
 bool ZeroedBlock(std::int64_t* physical) {
     return ZeroedSpan(physical, SparseSlot);
+}
+// The same for a slot of the guest's memory.
+bool ZeroedGuestBlock(std::int64_t* physical) {
+    return ZeroedSpan(physical, SparseSlot, true);
 }
 bool MapSlot(std::uintptr_t at, int protection, std::int64_t physical) {
     void* address = reinterpret_cast<void*>(at);

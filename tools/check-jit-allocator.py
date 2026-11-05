@@ -39,6 +39,9 @@ extern "C" int sceKernelAvailableDirectMemorySize(std::int64_t, std::int64_t, si
                                                   size_t* size) {
     *start = 0; *size = std::size_t{1} << 40; return 0;
 }
+// And what the pool has free in all: nothing taken, here.
+struct EdenDirectRegion { std::int64_t start; std::int64_t end; std::int32_t type; };
+extern "C" int sceKernelDirectMemoryQuery(std::int64_t, int, EdenDirectRegion*, size_t) { return -1; }
 extern "C" int sceKernelReserveVirtualRange(void** out, size_t size, int, size_t) {
     if (!reserve_ok) return std::int32_t(0x80020001u);
     void* at=mmap(reinterpret_cast<void*>(reserve_at),size,PROT_NONE,

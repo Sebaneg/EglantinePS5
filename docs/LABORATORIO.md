@@ -109,7 +109,8 @@ Estas se aplican **después** de los ajustes del juego (Ajustes > Rendimiento), 
 | `memoria_compacta=on` | La memoria del juego se reparte en bloques de 2 MB. Con esto, un bloque con muchas partes vacías (ceros) guarda solo las partes usadas, de 16 KB. Libera memoria; cuando el juego vuelve a escribir en uno de esos bloques espera un momento (unos 0,3 ms). En `stderr.log`: `EDEN_CRAM on: ... fine=1`, y `fine_held=` dice cuánto guarda así. |
 | `bloques_repetidos=on` | Los bloques de 2 MB con el mismo contenido se guardan una sola vez. En un juego grande bajó de 30 a 20 FPS. En `stderr.log`: `EDEN_CRAM on: ... dedup=1`, y `dedup=` cuenta los bloques compartidos. |
 | `reserva_juego=N` | La reserva de memoria para el juego, en MB (de 32 a 1024; sin esta línea, 1024). Es memoria apartada para cuando el juego escribe de golpe y no queda libre. Mario Kart World nunca la usó mientras a los gráficos les faltaba memoria. En `stderr.log`: `EDEN_CRAM ... reserve_used=` cuenta los bloques que el juego tomó de ella. Para probar: `reserva_juego=256`. |
-| `swap=on` | **Intercambio a disco de la memoria del juego.** Cuando la memoria escasea, los bloques de 2 MB del juego que nadie toca desde hace unos segundos se guardan en `/data/eglantineps5/swap_juego.bin` y su memoria vuelve a la consola; si el juego los vuelve a usar, se leen del SSD (~1 ms) y sigue. Así el juego no se cierra cuando su memoria no cabe: en el peor caso da un tirón. Empieza a vigilar bloques con menos de 2 GB libres en un solo bloque y a guardarlos con menos de 768 MB, hasta volver a 1,25 GB. Se lee al empezar el juego. En `stderr.log`: `EDEN_SWAP now probation=... swapped=... swap_outs=... swap_ins=...`. Prueba de PC: `tools/check-guest-swap.py`. |
+| `juego_arriba=on` | La memoria del juego (sus bloques de 2 MB) se toma desde el final de la memoria de la consola, y la gráfica sigue tomándola desde el principio. Sin esto se mezclaban: cuando el juego liberaba bloques (por ejemplo, al mandarlos al disco con `swap=on`), quedaban huecos de 2 MB entre la memoria gráfica que la gráfica no puede usar. En Mario Kart World quedaron 1,5 GB libres pero el bloque más grande era de 214 MB, y el juego bajó a 1–5 FPS. Se lee al empezar el juego. |
+| `swap=on` | **Intercambio a disco de la memoria del juego.** Cuando la memoria escasea, los bloques de 2 MB del juego que nadie toca desde hace unos segundos se guardan en `/data/eglantineps5/swap_juego.bin` y su memoria vuelve a la consola; si el juego los vuelve a usar, se leen del SSD (~1 ms) y sigue. Así el juego no se cierra cuando su memoria no cabe: en el peor caso da un tirón. Empieza a vigilar bloques con menos de 2,5 GB libres en total y a guardarlos con menos de 1 GB libre en total, hasta volver a 1,5 GB. Si la memoria libre está troceada pero hay bastante en total, no guarda nada (no serviría). Se lee al empezar el juego. En `stderr.log`: `EDEN_SWAP now probation=... swapped=... swap_outs=... swap_ins=...`. Prueba de PC: `tools/check-guest-swap.py`. |
 | `swap_frio=N` | Segundos sin que nadie toque un bloque antes de poder guardarlo en el disco (de 2 a 120; sin esta línea, 8). Más bajo libera antes pero puede traer bloques de vuelta más a menudo. Solo con `swap=on`. |
 | `heap_bloque_propio=N` | La memoria interna del emulador: los bloques de N MB o más (de 2 a 32; sin esta línea, 32) tienen memoria aparte, que vuelve a la consola al liberarlos. Si no, dejan huecos que solo otro bloque del mismo tamaño puede usar. Puede ir algo más lento. En `stderr.log`, la línea `heap: holds ... MiB, ... MiB of it in use` dice cuánto retiene y cuánto usa. Para probar: `heap_bloque_propio=4`. |
 | `heap_trozo=N` | Cuánto crece de golpe la memoria interna del emulador: 32, 64, 96 o 128 MB (sin esta línea, 128). Solo un trozo que se queda completamente vacío vuelve a la consola, y uno de 128 MB casi nunca se vacía: Mario Kart World retenía 2,7 GB con 1,4 GB en uso. Con trozos más pequeños se vacían y se devuelven más a menudo. Puede ir algo más lento. En `stderr.log`, la línea `heap: holds ... MiB, ... MiB of it in use` dice cuánto retiene y cuánto usa. Para probar: `heap_trozo=32`. |
@@ -129,3 +130,20 @@ Estas se aplican **después** de los ajustes del juego (Ajustes > Rendimiento), 
 | `log=render` | Registro detallado de los gráficos. |
 | `log_filter=...` | Cualquier filtro de Eden, con `+` en lugar de espacios: `log_filter=*:Info+Render.Vulkan:Debug`. |
 | `env=EDEN_NX2_TC_LOG=N` | Cada N fotogramas, en `eden_log.txt`: la memoria de gráficos en uso y las 12 texturas más grandes (`Texture cache: device memory ...`). Con `1` o sin número, cada 600. |
+
+## La línea `EDEN_TIMELINE` (stderr.log, cada 2 s)
+
+Escribe en una sola línea lo que decide cómo va el juego, para ver qué cambia justo cuando se pone lento. Sigue escribiéndose aunque el juego casi no dibuje.
+
+| Campo | Qué es |
+|---|---|
+| `t` | Segundos desde que empezó el juego. |
+| `fps`, `worst_ms` | Fotogramas por segundo en esos 2 s, y la espera más larga entre dos fotogramas. |
+| `free`, `largest` | Memoria libre de la consola en total, y su bloque libre más grande (MB). Si `free` es alto pero `largest` bajo, la memoria está troceada. |
+| `short` | 1 si el emulador cree que falta memoria (el caché de texturas borra texturas). |
+| `guest`, `heap`, `jit`, `gpu_rest` | Memoria del juego, interna del emulador, del código traducido, y el resto (casi todo gráfica), en MB. |
+| `swapped` | Memoria del juego guardada en el SSD ahora (`swap=on`). |
+| `written` | Bloques de 2 MB que el juego escribió por primera vez en esos 2 s (el juego pidiendo memoria nueva). |
+| `waits` | Veces que un hilo esperó a que otro terminara con un bloque. |
+| `swap_out`, `swap_in` | Bloques mandados al SSD y traídos de vuelta en esos 2 s. Muchos `swap_in` seguidos = el juego necesita lo que se guardó (tirones). |
+| `probe_hits` | Bloques en vigilancia que el juego volvió a tocar. |

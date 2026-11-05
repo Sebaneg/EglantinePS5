@@ -40,7 +40,7 @@ int fd = -1;
 std::mutex lock;
 std::vector<bool> used(Pages, false);
 std::atomic<std::size_t> taken{0};
-std::atomic<long long> largest_override{-1};
+std::atomic<long long> largest_override{-1}, free_override{-1};
 void Open() {
     if (fd >= 0) return;
     fd = memfd_create("eden-pool", 0);
@@ -62,6 +62,25 @@ int Take(std::size_t size, std::size_t alignment, std::int64_t* start) {
         return 0;
     }
     return -1;
+}
+// From the top of the pool down, as src/direct_memory.c's eden_direct_high places blocks.
+int TakeTop(std::size_t size, std::size_t alignment, std::int64_t* start) {
+    Open();
+    if (size == 0 || size % Page != 0) return -1;
+    if (alignment < Page) alignment = Page;
+    const std::size_t pages = size / Page, step = alignment / Page;
+    std::lock_guard guard{lock};
+    for (std::size_t first = (Pages - pages) / step * step;; first -= step) {
+        bool free = true;
+        for (std::size_t p = first; p < first + pages && free; ++p) free = !used[p];
+        if (free) {
+            for (std::size_t p = first; p < first + pages; ++p) used[p] = true;
+            *start = static_cast<std::int64_t>(first * Page);
+            taken += size;
+            return 0;
+        }
+        if (first < step) return -1;
+    }
 }
 int Release(std::int64_t start, std::size_t size) {
     std::lock_guard guard{lock};
@@ -137,7 +156,7 @@ std::int32_t sceKernelAvailableDirectMemorySize(std::int64_t, std::int64_t, std:
 }
 int sceKernelDebugOutText(int, const char* text) { return (int)write(2, text, std::strlen(text)); }
 int eden_direct_high(std::size_t size, std::size_t alignment, int, std::int64_t* start) {
-    return mock::Take(size, alignment, start);
+    return mock::TakeTop(size, alignment, start);
 }
 int eden_direct_low(std::size_t size, std::size_t alignment, int, std::int64_t* start) {
     return mock::Take(size, alignment, start);
@@ -146,11 +165,29 @@ int eden_direct_low(std::size_t size, std::size_t alignment, int, std::int64_t* 
 '''
 
 TEST = r'''
+// (mock) The taken region at or after `offset`; with free_override, one region that leaves that much free.
+extern "C" std::int32_t sceKernelDirectMemoryQuery(std::int64_t offset, int, EdenDirectRegion* region, std::size_t) {
+    const long long forced = mock::free_override.load();
+    if (forced >= 0) {
+        if (offset != 0 || forced >= static_cast<long long>(mock::Pool)) return -1;
+        *region = {0, static_cast<std::int64_t>(mock::Pool) - forced, 0};
+        return 0;
+    }
+    std::lock_guard guard{mock::lock};
+    std::size_t page = static_cast<std::size_t>(offset) / mock::Page;
+    while (page < mock::Pages && !mock::used[page]) ++page;
+    if (page >= mock::Pages) return -1;
+    std::size_t end = page;
+    while (end < mock::Pages && mock::used[end]) ++end;
+    *region = {static_cast<std::int64_t>(page * mock::Page), static_cast<std::int64_t>(end * mock::Page), 0};
+    return 0;
+}
 #include <chrono>
 #include <thread>
 
 namespace Common {
 void SetGuestMemorySwap(bool on, const char* path, unsigned cold_seconds) noexcept;
+void SetGuestBlocksHigh(bool on) noexcept;
 int GuestMemorySlotState(std::uint64_t offset) noexcept;
 void GuestMemoryUsage(std::size_t* span, std::size_t* held) noexcept;
 void ClearGuestMemory(std::uint8_t* at, std::uint64_t offset, std::size_t bytes, int fill) noexcept;
@@ -197,6 +234,7 @@ int main(int argc, char** argv) {
     if (argc < 2) return 2;
     setenv("EDEN_SWAP_COLD_SECONDS", "2", 1);
     Common::SetGuestMemorySwap(true, argv[1], 0);
+    Common::SetGuestBlocksHigh(true); // juego_arriba=on: blocks through eden_direct_high
     constexpr std::size_t Size = std::size_t{256} << 20, Slots = Size / Common::SparseSlot, Written = 64;
     auto* base = static_cast<std::uint8_t*>(Common::AllocateGuestMemoryWhereUsed(Size));
     if (base == nullptr) { std::fprintf(stderr, "no guest memory\n"); return 1; }
@@ -204,8 +242,15 @@ int main(int argc, char** argv) {
     if (Count(Slots, 1) != Written) { std::fprintf(stderr, "%zu slots Own after the writes\n", Count(Slots, 1)); return 1; }
     const std::size_t held_written = Held();
 
+    // A pool in pieces (its largest block small, much free in all) is not short of memory: slots go
+    // on probation, none to the file, since that would free nothing larger.
+    mock::largest_override = std::int64_t{100} << 20; mock::free_override = std::int64_t{2} << 30;
+    std::this_thread::sleep_for(std::chrono::seconds(4));
+    if (Count(Slots, 5) != 0) { std::fprintf(stderr, "%zu slots swapped with 2 GiB free\n", Count(Slots, 5)); return 1; }
+    std::printf("pool in pieces: %zu slots on probation, none swapped with 2 GiB free in all\n", Count(Slots, 4));
+
     // The pool looks short: every written slot goes on probation, then to the file.
-    mock::largest_override = std::int64_t{100} << 20;
+    mock::largest_override = std::int64_t{100} << 20; mock::free_override = std::int64_t{100} << 20;
     WaitFor("the written slots to be swapped", [&] { return Count(Slots, 5) == Written; }, 30);
     const std::size_t held_swapped = Held();
     if (held_written - held_swapped < Written * Common::SparseSlot) {
@@ -216,7 +261,7 @@ int main(int argc, char** argv) {
                 held_written >> 20, held_swapped >> 20);
 
     // Plenty again: eight threads read every slot back and write half of them anew.
-    mock::largest_override = std::int64_t{2} << 30;
+    mock::largest_override = std::int64_t{3} << 30; mock::free_override = std::int64_t{3} << 30;
     std::atomic<bool> failed{false};
     std::atomic<unsigned> arrived{0};
     std::vector<std::thread> threads;
@@ -238,9 +283,9 @@ int main(int argc, char** argv) {
     std::printf("read back: 8 threads, every byte as written, %zu slots Own again\n", Count(Slots, 1));
 
     // Short again: out once more; a slot cleared while in the file reads zeroes; the rest come back.
-    mock::largest_override = std::int64_t{100} << 20;
+    mock::largest_override = std::int64_t{100} << 20; mock::free_override = std::int64_t{100} << 20;
     WaitFor("the slots to be swapped again", [&] { return Count(Slots, 5) == Written; }, 30);
-    mock::largest_override = std::int64_t{2} << 30;
+    mock::largest_override = std::int64_t{3} << 30; mock::free_override = std::int64_t{3} << 30;
     Common::ClearGuestMemory(base + 3 * Common::SparseSlot, 3 * Common::SparseSlot, Common::SparseSlot, 0);
     if (Common::GuestMemorySlotState(3 * Common::SparseSlot) != 0) { std::fprintf(stderr, "cleared slot not Zero\n"); return 1; }
     for (std::size_t i = 0; i < Common::SparseSlot; i += 4096)
@@ -252,7 +297,7 @@ int main(int argc, char** argv) {
     // The hard case: the pool stays short while eight threads use their slots. Each thread owns
     // eight slots, writes one now and then and reads all of its own, with pauses, so that slots
     // go cold, out and back again under the swapper's feet.
-    mock::largest_override = std::int64_t{100} << 20;
+    mock::largest_override = std::int64_t{100} << 20; mock::free_override = std::int64_t{100} << 20;
     std::atomic<std::uint64_t> touches{0};
     std::vector<std::thread> users;
     for (unsigned t = 0; t < 8; ++t)
@@ -284,7 +329,7 @@ int main(int argc, char** argv) {
     if (failed) return 1;
     std::printf("under the swapper: %llu touches in 8 s from 8 threads, every byte as last written\n",
                 (unsigned long long)touches.load());
-    mock::largest_override = std::int64_t{2} << 30;
+    mock::largest_override = std::int64_t{3} << 30; mock::free_override = std::int64_t{3} << 30;
 
     Common::FreeGuestMemory(base, Size);
     if (mock::taken.load() > (std::size_t{64} << 20)) {
@@ -309,7 +354,7 @@ with tempfile.TemporaryDirectory(prefix='eden-swap-') as work:
     result = subprocess.run([str(binary), str(work / 'swap.bin')], capture_output=True, text=True, timeout=300)
     sys.stdout.write(result.stdout)
     for line in result.stderr.splitlines():
-        if line.startswith('EDEN_SWAP end'):
+        if line.startswith(('EDEN_SWAP end', 'EDEN_GUEST_PLACEMENT')):
             print(line)
     if result.returncode != 0:
         sys.stderr.write(result.stderr[-4000:])

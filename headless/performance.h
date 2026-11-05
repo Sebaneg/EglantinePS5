@@ -294,6 +294,10 @@ void RecordHle(const char* service, unsigned command, long long ns);
 // dev-settings gc_dirty=upstream restores Eden's rule.
 inline std::atomic<bool> gc_keep_dirty{true};
 inline std::atomic<bool> graphics_memory_short{false};
+// Frames the game showed, and the longest gap between two of them (us) since EDEN_TIMELINE last
+// read it (headless/graphics.cpp counts them; headless/performance.cpp reports them).
+inline std::atomic<unsigned> frames_shown{0};
+inline std::atomic<unsigned> frame_gap_worst_us{0};
 // 1 GiB: the pool is the CPU's too, and the largest thing a game asked of it at once was a block of
 // 486 MiB (a texture array of 121 layers, decoded before it is uploaded). With less here the collector
 // let the pool run down to 620 MiB in one block, and that request ended the session.

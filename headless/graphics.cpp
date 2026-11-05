@@ -654,9 +654,15 @@ void GraphicsWindow::OnFrameDisplayed() {
         // What a recorded controller session counts frames by (gameplay_test.h): the input
         // worker runs on another thread, so it reads a copy rather than the member.
         Display::gameplay_frame.store(frame_total, std::memory_order_relaxed);
+        Eden::Performance::frames_shown.fetch_add(1, std::memory_order_relaxed);
         if (frame_sample_start < 0) {
             frame_sample_start = frame_sample_last = now;
         } else {
+            const auto gap_us = static_cast<unsigned>(std::min((now - frame_sample_last) * 1e6, 4e9));
+            unsigned worst = Eden::Performance::frame_gap_worst_us.load(std::memory_order_relaxed);
+            while (gap_us > worst && !Eden::Performance::frame_gap_worst_us.compare_exchange_weak(
+                                         worst, gap_us, std::memory_order_relaxed)) {
+            }
             ++frame_sample_count;
             frame_sample_worst = std::max(frame_sample_worst, now - frame_sample_last);
 #ifdef EDEN_DEV_PROFILE
