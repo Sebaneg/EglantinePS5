@@ -277,6 +277,10 @@ struct SparseRange {
     bool promote = false;               // writes to shared slots are promoted (the service runs)
     std::uint16_t* fine = nullptr;      // per slot: 16 KiB pages a Fine slot keeps (low 8 bits), times made whole (bits 8-11)
     std::uint32_t* fine_after = nullptr; // per slot: the scan pass from which it may be made Fine again
+    // lazy_zero: per zero run the range touches, 1 once its empty slots show the run (MapZeroOnFault).
+    std::atomic<std::uint8_t>* zero_groups = nullptr;
+    std::size_t first_group = 0;        // the run (address / run bytes) of zero_groups[0]
+    std::atomic_flag lazy_lock = ATOMIC_FLAG_INIT; // a run being shown, or a table slot committed
 };
 std::array<SparseRange, 64> sparse_ranges;
 std::mutex sparse_mutex;
@@ -312,6 +316,11 @@ extern "C" int eden_direct_low(std::size_t size, std::size_t alignment, int type
 constexpr std::size_t ZeroRunSlots = 16;
 std::size_t zero_run_slots = 1;
 std::int64_t zero_block = -1;
+// Ranges only reserved, their zero runs shown at the first access (MapZeroOnFault). The process may
+// map only so much direct memory: the guest's 14 GiB and Eden's tables all showing zeroes counted
+// with the driver's sparse ranges, and Mario Kart World's driver was refused mappings at ~31.5 GiB
+// mapped with 7142 mappings, as at ~31.8 GiB with 48844. Set by the start-up check (LazyZeroWorks).
+bool lazy_zero = false;
 
 // `bytes` of direct memory, zeroed through a mapping of its own that is gone again.
 bool ZeroedSpan(std::int64_t* physical, std::size_t bytes) {
@@ -352,6 +361,9 @@ bool MapZero(std::uintptr_t at, std::size_t slots) {
     }
     return true;
 }
+#else
+constexpr bool lazy_zero = false; // the host mirror maps its ranges whole
+constexpr std::size_t zero_run_slots = 1;
 #endif
 
 // Reserves `span` bytes whose every slot reads as zeroes. Null when the platform refuses. The
@@ -364,6 +376,7 @@ void* ReserveSparse(std::size_t span, [[maybe_unused]] bool guest = false) {
         (void)munmap(address, span);
         return nullptr;
     }
+    if (lazy_zero) return address; // shown run by run as it is first read (MapZeroOnFault)
     if (!MapZero(reinterpret_cast<std::uintptr_t>(address), span / SparseSlot)) {
         (void)munmap(address, span);
         return nullptr;
@@ -391,6 +404,7 @@ bool OwnSlot(std::uintptr_t at, std::int64_t* physical) {
 }
 
 // The service's side of a range (guest_memory_service.inc).
+bool InstallServiceSignal() noexcept;
 void ReleaseServiceBlocks(SparseRange& range) noexcept;
 bool ServiceCommit(SparseRange& range, std::size_t slot) noexcept;
 void ServiceStart(SparseRange& range) noexcept;
@@ -420,6 +434,8 @@ void ReleaseSparse(SparseRange& range) {
     delete[] range.fine_after;
     range.fine_after = nullptr;
     range.begin.store(0, std::memory_order_release);
+    delete[] range.zero_groups;
+    range.zero_groups = nullptr;
     delete[] range.owned;
     delete[] range.physical;
     range.owned = nullptr;
@@ -470,6 +486,60 @@ const char* ZeroRunWorks() {
             result = "run-zero-again";
     }
     if (munmap(reserved, 2 * run_bytes) != 0) std::abort();
+    return result;
+}
+
+// lazy_zero's check, sparse_mutex held: a range of two runs, only reserved and registered as a
+// sparse range, is read in the middle. The read faults, MapZeroOnFault shows that run, and the read
+// gives zero; the run is marked shown. Anything else turns lazy_zero off again.
+const char* LazyZeroWorks() {
+    if (!InstallServiceSignal()) return "lazy-signal";
+    SparseRange* range = nullptr;
+    for (auto& candidate : sparse_ranges)
+        if (candidate.begin.load(std::memory_order_relaxed) == 0) {
+            range = &candidate;
+            break;
+        }
+    if (range == nullptr) return "lazy-range";
+    const std::size_t run_bytes = zero_run_slots * SparseSlot;
+    const std::size_t span = 2 * run_bytes, slots = span / SparseSlot;
+    lazy_zero = true;
+    void* const reserved = ReserveSparse(span); // only reserved now
+    auto* owned = new (std::nothrow) std::atomic<bool>[slots];
+    auto* physical = new (std::nothrow) std::int64_t[slots];
+    const auto at = reinterpret_cast<std::uintptr_t>(reserved);
+    const std::size_t first = at / run_bytes, last = (at + span - 1) / run_bytes;
+    auto* groups = new (std::nothrow) std::atomic<std::uint8_t>[last - first + 1];
+    const char* result = "ok";
+    if (reserved == nullptr || owned == nullptr || physical == nullptr || groups == nullptr) {
+        result = "lazy-reserve";
+    } else {
+        for (std::size_t slot = 0; slot < slots; ++slot) {
+            owned[slot].store(false, std::memory_order_relaxed);
+            physical[slot] = -1;
+        }
+        for (std::size_t group = 0; group <= last - first; ++group) groups[group].store(0, std::memory_order_relaxed);
+        range->owned = owned;
+        range->physical = physical;
+        range->zero_groups = groups;
+        range->first_group = first;
+        range->end = at + span;
+        range->begin.store(at, std::memory_order_release);
+        const std::uintptr_t middle = at + span / 2 + 64;
+        const std::uint64_t value = *reinterpret_cast<volatile std::uint64_t*>(middle); // faults once
+        if (value != 0) result = "lazy-read";
+        else if (groups[middle / run_bytes - first].load(std::memory_order_acquire) != 1) result = "lazy-shown";
+        range->begin.store(0, std::memory_order_release);
+        range->end = 0;
+        range->owned = nullptr;
+        range->physical = nullptr;
+        range->zero_groups = nullptr;
+    }
+    if (reserved != nullptr && munmap(reserved, span) != 0) std::abort();
+    delete[] owned;
+    delete[] physical;
+    delete[] groups;
+    if (std::strcmp(result, "ok") != 0) lazy_zero = false;
     return result;
 }
 #endif
@@ -544,9 +614,17 @@ bool SparseAvailable() {
             if (munmap(const_cast<std::uint64_t*>(probe), 2 * SparseSlot) != 0) std::abort();
         }
     }
-    char line[128];
-    const int length = std::snprintf(line, sizeof(line), "EDEN_SPARSE_TABLES available=%d step=%s zero_run=%zu (%s)\n",
-                                     ok ? 1 : 0, step, zero_run_slots_reported(), run_step);
+    // Ranges only reserved, shown run by run as they are read (MapZeroOnFault), once the check passes.
+    // dev-settings lazy_zero=off keeps them shown whole.
+    [[maybe_unused]] const char* lazy_step = "off";
+#ifdef PS5_NATIVE
+    if (ok && !DevSetting("lazy_zero=off")) lazy_step = LazyZeroWorks();
+#endif
+    char line[160];
+    const int length = std::snprintf(line, sizeof(line),
+                                     "EDEN_SPARSE_TABLES available=%d step=%s zero_run=%zu (%s) lazy_zero=%d (%s)\n",
+                                     ok ? 1 : 0, step, zero_run_slots_reported(), run_step, lazy_zero ? 1 : 0,
+                                     lazy_step);
     if (length > 0) Report(line);
     sparse_state.store(ok ? 1 : 2, std::memory_order_release);
     return ok;
@@ -602,6 +680,22 @@ void* NewSparseRange(std::size_t size, bool guest) {
     for (std::size_t slot = 0; slot < slots; ++slot) {
         owned[slot].store(false, std::memory_order_relaxed);
         physical[slot] = -1;
+    }
+    if (lazy_zero) {
+        // Every zero run the range touches, the first and last ones in part.
+        const std::size_t first = reinterpret_cast<std::uintptr_t>(address) / SparseSlot / zero_run_slots;
+        const std::size_t last = (reinterpret_cast<std::uintptr_t>(address) + span - 1) / SparseSlot / zero_run_slots;
+        auto* groups = new (std::nothrow) std::atomic<std::uint8_t>[last - first + 1];
+        if (groups == nullptr) {
+            (void)munmap(address, span);
+            sparse_refused = "no-table";
+            delete[] owned;
+            delete[] physical;
+            return nullptr;
+        }
+        for (std::size_t group = 0; group <= last - first; ++group) groups[group].store(0, std::memory_order_relaxed);
+        free_range->zero_groups = groups;
+        free_range->first_group = first;
     }
     free_range->owned = owned;
     free_range->physical = physical;
@@ -729,6 +823,8 @@ void CommitSparsePage(std::uintptr_t page) noexcept {
     }
     const std::lock_guard lock{sparse_mutex};
     if (range->owned[slot].load(std::memory_order_relaxed)) return;
+    // lazy_zero: not while a fault shows the slot's run (MapZeroOnFault), which skips owned slots.
+    while (range->lazy_lock.test_and_set(std::memory_order_acquire)) sched_yield();
     if (!OwnSlot(begin + slot * SparseSlot, &range->physical[slot])) {
         // Out of memory in the middle of a guest mapping: there is no table to continue with.
         Report("EDEN_SPARSE_TABLES commit failed: out of memory\n");
@@ -736,6 +832,7 @@ void CommitSparsePage(std::uintptr_t page) noexcept {
     }
     (range->guest ? guest_committed : sparse_committed).fetch_add(SparseSlot, std::memory_order_relaxed);
     range->owned[slot].store(true, std::memory_order_release);
+    range->lazy_lock.clear(std::memory_order_release);
 }
 
 // Eden gives back a table page once a guest unmapped all of it, and expects zeroes there

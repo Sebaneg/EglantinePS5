@@ -606,7 +606,61 @@ bool HandleGuestWriteFault(void* fault) noexcept {
 namespace {
 struct sigaction service_previous_segv{}, service_previous_bus{};
 
+// lazy_zero: an access to a slot of a range that is only reserved. The empty slots of the slot's zero
+// run show their part of the run (read-only) and the access repeats: a read now finds zeroes, and a
+// write faults again on them and is promoted as before (HandleGuestWriteFault, or the table's commit).
+// A slot with memory of its own is left as it is: the guest's slots are locked and their state read,
+// a table's are skipped by `owned` under lazy_lock, which CommitSparsePage holds too.
+bool MapZeroOnFault(void* fault) noexcept {
+#ifdef PS5_NATIVE
+    if (!lazy_zero || fault == nullptr) return false;
+    const auto address = reinterpret_cast<std::uintptr_t>(fault);
+    SparseRange* const range = SparseRangeOf(address);
+    if (range == nullptr || range->zero_groups == nullptr) return false;
+    const std::uintptr_t begin = range->begin.load(std::memory_order_acquire);
+    const std::size_t run_bytes = zero_run_slots * SparseSlot;
+    const std::size_t group = address / run_bytes;
+    std::atomic<std::uint8_t>& shown = range->zero_groups[group - range->first_group];
+    if (shown.load(std::memory_order_acquire) != 0) return false; // shown already: a real fault, or a write
+    while (range->lazy_lock.test_and_set(std::memory_order_acquire)) sched_yield();
+    if (shown.load(std::memory_order_relaxed) == 0) {
+        const std::size_t first = (std::max<std::uintptr_t>(group * run_bytes, begin) - begin) / SparseSlot;
+        const std::size_t last = (std::min<std::uintptr_t>((group + 1) * run_bytes, range->end) - begin) / SparseSlot;
+        const bool states = range->state != nullptr;
+        if (states)
+            for (std::size_t slot = first; slot < last; ++slot) (void)LockSlot(*range, slot);
+        bool ok = true;
+        for (std::size_t slot = first; slot < last && ok;) {
+            const auto empty = [&](std::size_t s) {
+                return states ? SlotState(*range, s) == SlotZero : !range->owned[s].load(std::memory_order_acquire);
+            };
+            if (!empty(slot)) {
+                ++slot;
+                continue;
+            }
+            std::size_t end = slot + 1;
+            while (end < last && empty(end)) ++end;
+            ok = MapZero(begin + slot * SparseSlot, end - slot);
+            slot = end;
+        }
+        if (states)
+            for (std::size_t slot = first; slot < last; ++slot) UnlockSlot(*range, slot, SlotState(*range, slot));
+        if (!ok) {
+            range->lazy_lock.clear(std::memory_order_release);
+            return false; // the fault goes on to the crash report
+        }
+        shown.store(1, std::memory_order_release);
+    }
+    range->lazy_lock.clear(std::memory_order_release);
+    return true;
+#else
+    (void)fault;
+    return false;
+#endif
+}
+
 void ServiceSignal(int signal, siginfo_t* info, void* context) {
+    if (MapZeroOnFault(info ? info->si_addr : nullptr)) return;
 #ifdef PS5_NATIVE
     fault_in_app_code = false;
     for (std::uintptr_t& pc : fault_pcs) pc = 0;
