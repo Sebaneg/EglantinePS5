@@ -28,6 +28,7 @@ extern "C" void eden_heap_set_large_request(std::size_t bytes) __attribute__((we
 namespace Common {
 void SetGuestMemoryService(bool on, bool scan, bool dedup) noexcept;
 void SetGuestMemoryFine(bool on) noexcept;
+void SetGuestMemoryReserve(std::size_t mib) noexcept;
 } // namespace Common
 
 namespace Eden::Lab {
@@ -53,6 +54,7 @@ struct Defaults {
     int hcr_mode;
     unsigned cache_lock_spins, idle_spin_iterations, dispatch_mask;
     ::Settings::AstcDecodeMode astc;
+    ::Settings::AstcRecompression astc_recompression;
     bool vertex_input_dynamic;
     ::Settings::GpuClock gpu_clock;
     ::Settings::ExtendedDynamicState dyna_state;
@@ -71,7 +73,7 @@ inline const Defaults& Initial() {
         Performance::gc_keep_dirty.load(), Performance::graphics_usage_from_pool.load(),
         DevVulkan::hcr_mode, Performance::cache_lock_spins.load(),
         Performance::idle_spin_iterations.load(), Performance::dispatch_mask.load(),
-        ::Settings::values.accelerate_astc.GetValue(),
+        ::Settings::values.accelerate_astc.GetValue(), ::Settings::values.astc_recompression.GetValue(),
         ::Settings::values.vertex_input_dynamic_state.GetValue(),
         ::Settings::values.gpu_clock.GetValue(), ::Settings::values.dyna_state.GetValue(),
         ::Settings::values.vsync_mode.GetValue(), ::Settings::values.async_presentation.GetValue()};
@@ -104,6 +106,8 @@ inline void Restore() {
     Performance::idle_spin_iterations = d.idle_spin_iterations;
     Performance::dispatch_mask = d.dispatch_mask;
     ::Settings::values.accelerate_astc.SetValue(d.astc);
+    ::Settings::values.astc_recompression.SetValue(d.astc_recompression);
+    Common::SetGuestMemoryReserve(1024);
     ::Settings::values.vertex_input_dynamic_state.SetValue(d.vertex_input_dynamic);
     ::Settings::values.gpu_clock.SetValue(d.gpu_clock);
     ::Settings::values.dyna_state.SetValue(d.dyna_state);
@@ -182,6 +186,8 @@ inline bool ApplyEarly(const std::string& entry, bool& block_list_set) {
         ::Settings::values.dyna_state.SetValue(static_cast<::Settings::ExtendedDynamicState>(entry[11] - '0'));
     else if (entry == "astc=cpu") ::Settings::values.accelerate_astc.SetValue(::Settings::AstcDecodeMode::Cpu);
     else if (entry == "astc=gpu") ::Settings::values.accelerate_astc.SetValue(::Settings::AstcDecodeMode::Gpu);
+    // ASTC textures re-compressed to BC1 (8 bytes a block, alpha on or off) instead of BC3 (16).
+    else if (entry == "astc_bc1=on") ::Settings::values.astc_recompression.SetValue(::Settings::AstcRecompression::Bc1);
     else if (entry == "vram=aggressive") ::Settings::values.vram_usage_mode.SetValue(::Settings::VramUsageMode::Aggressive);
     else if (entry == "vram=conservative") ::Settings::values.vram_usage_mode.SetValue(::Settings::VramUsageMode::Conservative);
     else if (entry == "gpu_clock=normal" || entry == "gpu_clock=boost" || entry == "gpu_clock=overclock")
@@ -219,6 +225,9 @@ inline bool ApplyEarly(const std::string& entry, bool& block_list_set) {
     // holds many pages of zeroes; bloques_repetidos shares 2 MiB blocks with the same contents.
     else if (entry == "memoria_compacta=on" || entry == "memoria_compacta=off")
         Common::SetGuestMemoryFine(entry.ends_with("on"));
+    // The game's headroom (MiB, 32 to 1024; 1024 without this line): blocks held for its writes.
+    else if (entry.starts_with("reserva_juego=") && Number(entry, 14, n))
+        Common::SetGuestMemoryReserve(static_cast<std::size_t>(n));
     else if (entry == "bloques_repetidos=on" || entry == "bloques_repetidos=off")
         Common::SetGuestMemoryService(true, true, entry.ends_with("on"));
     // The emulator's heap: blocks of this many MiB or more (2 to 32) get memory of their own,

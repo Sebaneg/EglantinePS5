@@ -49,6 +49,7 @@ pipeline_trace=on
 | `vertex_input_dynamic=off` | Sin entrada de vértices dinámica. |
 | `dyna_state=0` … `3` | Nivel de estado dinámico extendido. |
 | `astc=cpu` / `gpu` | Dónde se descomprimen las texturas ASTC. |
+| `astc_bc1=on` | Las texturas ASTC se recomprimen a BC1 (la mitad de memoria) en vez de BC3. Las transparencias suaves (humo, hojas, cristales) pueden verse con bordes duros. |
 | `vram=aggressive` / `conservative` | Cuánta memoria gráfica usa (aggressive es el normal). |
 | `gpu_clock=normal` / `boost` / `overclock` | Velocidad de la GPU que ve el juego. |
 | `gc_dirty=upstream` | Libera antes las texturas que escribió la GPU. |
@@ -102,6 +103,7 @@ Estas se aplican **después** de los ajustes del juego (Ajustes > Rendimiento), 
 |---|---|
 | `memoria_compacta=on` | La memoria del juego se reparte en bloques de 2 MB. Con esto, un bloque con muchas partes vacías (ceros) guarda solo las partes usadas, de 16 KB. Libera memoria; cuando el juego vuelve a escribir en uno de esos bloques espera un momento (unos 0,3 ms). En `stderr.log`: `EDEN_CRAM on: ... fine=1`, y `fine_held=` dice cuánto guarda así. |
 | `bloques_repetidos=on` | Los bloques de 2 MB con el mismo contenido se guardan una sola vez. En un juego grande bajó de 30 a 20 FPS. En `stderr.log`: `EDEN_CRAM on: ... dedup=1`, y `dedup=` cuenta los bloques compartidos. |
+| `reserva_juego=N` | La reserva de memoria para el juego, en MB (de 32 a 1024; sin esta línea, 1024). Es memoria apartada para cuando el juego escribe de golpe y no queda libre. Mario Kart World nunca la usó mientras a los gráficos les faltaba memoria. En `stderr.log`: `EDEN_CRAM ... reserve_used=` cuenta los bloques que el juego tomó de ella. Para probar: `reserva_juego=256`. |
 | `heap_bloque_propio=N` | La memoria interna del emulador: los bloques de N MB o más (de 2 a 32; sin esta línea, 32) tienen memoria aparte, que vuelve a la consola al liberarlos. Si no, dejan huecos que solo otro bloque del mismo tamaño puede usar. Puede ir algo más lento. En `stderr.log`, la línea `heap: holds ... MiB, ... MiB of it in use` dice cuánto retiene y cuánto usa. Para probar: `heap_bloque_propio=4`. |
 | `jit_list=on` / `off` | La lista de bloques de código ya traducidos (manda sobre Ajustes). |
 | `jit_shared=off` | Cada núcleo traduce su propio código. |

@@ -96,6 +96,9 @@ std::uintptr_t SlotAddress(SparseRange& range, std::size_t slot) noexcept {
 // (ReserveKeeper) and given back with the guest's memory when the session ends.
 constexpr std::size_t ReserveBlocks = 512;      // 1 GiB
 constexpr std::size_t ReserveAtStart = 16;      // taken as the service starts; the keeper takes the rest
+// The blocks the keeper holds (lab file reserva_juego=MiB, SetGuestMemoryReserve). Mario Kart World
+// never took one block of its 1 GiB while its graphics ran out of memory.
+std::atomic<std::size_t> reserve_target{ReserveBlocks};
 std::int64_t reserve[ReserveBlocks];
 std::atomic<std::size_t> reserve_count{0};
 std::atomic_flag reserve_lock = ATOMIC_FLAG_INIT;
@@ -122,9 +125,9 @@ bool ReserveBlock(std::int64_t* physical) noexcept {
     if (ok) counters.reserve_used.fetch_add(1, std::memory_order_relaxed);
     return ok;
 }
-// Zeroed blocks into the reserve until it holds `blocks` (at most ReserveBlocks) or the pool says no.
+// Zeroed blocks into the reserve until it holds `blocks` (at most the target) or the pool says no.
 void FillReserve(std::size_t blocks = ReserveBlocks) noexcept {
-    blocks = std::min(blocks, ReserveBlocks);
+    blocks = std::min(blocks, reserve_target.load(std::memory_order_relaxed));
     for (;;) {
         Spin(reserve_lock);
         const bool full = reserve_count.load(std::memory_order_relaxed) >= blocks;
@@ -520,7 +523,7 @@ extern "C" void eden_guest_memory_reserve(std::size_t* held, std::size_t* target
 #ifdef PS5_NATIVE
     const bool running = service_range.load(std::memory_order_acquire) != nullptr;
     *held = running ? reserve_count.load(std::memory_order_relaxed) * SparseSlot : 0;
-    *target = running ? ReserveBlocks * SparseSlot : 0;
+    *target = running ? reserve_target.load(std::memory_order_relaxed) * SparseSlot : 0;
 #else
     *held = 0;
     *target = 0;
@@ -1163,6 +1166,13 @@ void SetGuestMemoryService(bool on, bool scan, bool dedup) noexcept {
 // waits for it to be made whole (a fault and a 2 MiB copy, about 0.3 ms).
 void SetGuestMemoryFine(bool on) noexcept {
     fine_requested.store(on, std::memory_order_relaxed);
+}
+
+// The lab file's reserva_juego=MiB: the guest's headroom, kept between 32 MiB (what the service takes
+// as it starts; with none, performance.h ViewOfPool would count a whole 1 GiB as taken) and 1 GiB.
+// Set before the game starts; the keeper fills the reserve up to it.
+void SetGuestMemoryReserve(std::size_t mib) noexcept {
+    reserve_target.store(std::clamp(mib / 2, ReserveAtStart, ReserveBlocks), std::memory_order_relaxed);
 }
 
 // The guest's kernel hands pages out: they are committed now only without the service.
