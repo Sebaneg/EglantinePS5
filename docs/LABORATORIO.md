@@ -84,7 +84,8 @@ pipeline_trace=on
 | `pipeline_trace=on` | Anota en `stderr.log` cada programa gráfico la primera vez que se usa: los de dibujo como `G1 ... vb=... fs=...` y los de cálculo como `C1 cs=...`. El último antes de un cuelgue es el sospechoso. |
 | `saltar_programa=HASH` | No ejecuta lo que usa ese programa. `HASH` es uno de los valores que lista `pipeline_trace`: `vb=` o `fs=` de un programa de dibujo, o `cs=` de uno de cálculo. Por ejemplo `saltar_programa=929ba7ee0d94ab75`. Se pueden poner varias líneas. Saltarse un cálculo puede romper el juego de otras formas: es solo para averiguar qué cuelga la GPU. |
 | `congelamiento_hilo=NOMBRE` | Si el juego se congela 30 s, el informe muestra dónde estaba ese hilo en vez del de la GPU. Nombres: `GPU` (el normal), `VulkanWorker` (el que envía el trabajo a la GPU), `GPUFencingThread` (el que espera a que la GPU termine), `VulkanPresent` (el que envía imágenes a la tele), `GPUBack`. |
-| `tirones=N` | Cuando el juego pasa N milisegundos (de 300 a 10000) sin mostrar un cuadro, anota en `stderr.log` dónde está cada hilo principal, sin cerrar el juego: el de la GPU, los de Vulkan y los 4 núcleos del juego (`CPUCore_0` a `CPUCore_3`). Una línea `EDEN_HITCH n=... still_ms=... HILO at ... calls ...` por hilo, hasta 4 rondas por tirón (a N, 2N, 3N y 4N ms), y `EDEN_HITCH end n=... lasted_ms=...` cuando vuelve a haber cuadros. Empieza 20 s después de que el juego muestre su primer cuadro. Recomendado: `tirones=700`. Se lee al arrancar el juego. |
+| `medir=on` | Enciende todas las mediciones a la vez (tiempos de Vulkan, hilo de la GPU por zonas, caché de texturas, tirones a 700 ms, `eden_log.txt` completo). Ver "Medir todo de una vez" más abajo. |
+| `tirones=N` | Cuando el juego pasa N milisegundos (de 300 a 10000) sin mostrar un cuadro, anota en `stderr.log` dónde está cada hilo principal, sin cerrar el juego: el de la GPU, los de Vulkan y los 4 núcleos del juego (`CPUCore_0` a `CPUCore_3`). Una línea `EDEN_HITCH n=... still_ms=... HILO at ... calls ...` por hilo, hasta 4 rondas por tirón (a N, 2N, 3N y 4N ms), y `EDEN_HITCH end n=... lasted_ms=...` cuando vuelve a haber cuadros. Si el hilo está dentro de una llamada que puede tardar (leer o escribir el swap, un fallo de memoria del juego, entregar trabajo a la GPU, esperar a la GPU o el candado de envío), la línea añade `doing="..." for_ms=...`; eso sale aunque el hilo `did not answer` (atascado en el sistema). Otros hilos ocupados en esas llamadas (`Swapper`, `GuestScan`) salen como `HILO busy doing=...`. Empieza 20 s después de que el juego muestre su primer cuadro. Recomendado: `tirones=700`. Se lee al arrancar el juego. |
 | `submit_sync=on` | Espera a la GPU después de cada envío. Muy lento, pero el cuelgue queda en el envío exacto. |
 | `gpu_time=on` | Mide el tiempo de la GPU de cada envío. |
 | `radv_debug=...` | Opciones del controlador gráfico, separadas por comas. Por ejemplo `radv_debug=syncshaders` (espera a cada programa) o `radv_debug=nodcc,nohiz` (sin compresiones). |
@@ -116,6 +117,7 @@ Estas se aplican **después** de los ajustes del juego (Ajustes > Rendimiento), 
 | `juego_arriba=on` | La memoria del juego (sus bloques de 2 MB) se toma desde el final de la memoria de la consola, y la gráfica sigue tomándola desde el principio. Sin esto se mezclaban: cuando el juego liberaba bloques (por ejemplo, al mandarlos al disco con `swap=on`), quedaban huecos de 2 MB entre la memoria gráfica que la gráfica no puede usar. En Mario Kart World quedaron 1,5 GB libres pero el bloque más grande era de 214 MB, y el juego bajó a 1–5 FPS. Se lee al empezar el juego. |
 | `swap=on` | **Intercambio a disco de la memoria del juego.** Cuando la memoria escasea, los bloques de 2 MB del juego que nadie toca desde hace unos segundos se guardan en `/data/eglantineps5/swap_juego.bin` y su memoria vuelve a la consola; si el juego los vuelve a usar, se leen del SSD (~1 ms) y sigue. Así el juego no se cierra cuando su memoria no cabe: en el peor caso da un tirón. Empieza a vigilar bloques con menos de 2,5 GB libres en total y a guardarlos con menos de 1 GB libre en total, hasta volver a 1,5 GB. Si la memoria libre está troceada pero hay bastante en total, no guarda nada (no serviría). Se lee al empezar el juego. En `stderr.log`: `EDEN_SWAP now probation=... swapped=... swap_outs=... swap_ins=...`. Además, si la gráfica pide memoria y no hay, en vez de cerrarse el juego manda al SSD al instante hasta 512 MB del juego (del borde junto a la gráfica) y lo vuelve a intentar hasta 3 veces (en `stderr.log`: `EDEN_GRAPHICS_MEMORY emergency`). Prueba de PC: `tools/check-guest-swap.py`. |
 | `swap_frio=N` | Segundos sin que nadie toque un bloque antes de poder guardarlo en el disco (de 2 a 120; sin esta línea, 8). Más bajo libera antes pero puede traer bloques de vuelta más a menudo. Solo con `swap=on`. |
+| `swap_caliente=N` | Segundos que un bloque que volvió del disco se queda en memoria sin que el swap lo vuelva a tocar (de 0 a 3600; sin esta línea, 120). Un bloque que el juego tocó mientras estaba "a prueba" queda protegido la cuarta parte de ese tiempo. En la carrera de Mario Kart World el swap sacaba memoria que el juego volvía a usar en la vuelta siguiente: 591 de 1232 bloques volvieron, cada uno con una lectura del SSD dentro del hilo del juego, y la carrera se paraba de 1 a 10 s. `0` deja el swap como antes. El rescate de emergencia de los gráficos sigue pudiendo sacarlos. En `stderr.log`, la línea `EDEN_SWAP` dice `slow_swap_ins=` (lecturas de 50 ms o más) y `swap_in_worst_ms=` (la más lenta desde la línea anterior). Solo con `swap=on`. |
 | `heap_bloque_propio=N` | La memoria interna del emulador: los bloques de N MB o más (de 2 a 32; sin esta línea, 32) tienen memoria aparte, que vuelve a la consola al liberarlos. Si no, dejan huecos que solo otro bloque del mismo tamaño puede usar. Puede ir algo más lento. En `stderr.log`, la línea `heap: holds ... MiB, ... MiB of it in use` dice cuánto retiene y cuánto usa. Para probar: `heap_bloque_propio=4`. |
 | `heap_trozo=N` | Cuánto crece de golpe la memoria interna del emulador: 32, 64, 96 o 128 MB (sin esta línea, 128). Solo un trozo que se queda completamente vacío vuelve a la consola, y uno de 128 MB casi nunca se vacía: Mario Kart World retenía 2,7 GB con 1,4 GB en uso. Con trozos más pequeños se vacían y se devuelven más a menudo. Puede ir algo más lento. En `stderr.log`, la línea `heap: holds ... MiB, ... MiB of it in use` dice cuánto retiene y cuánto usa. Para probar: `heap_trozo=32`. |
 | `pila_hilos=N` | La pila de cada hilo del juego, en KB (de 256 a 2048; sin esta línea, 2048). En la PS5 esa memoria se ocupa entera desde el principio: Mario Kart World tiene 151 hilos, 302 MB con 2048 KB y 75 MB con 512 (lo que usaba yuzu). Si el juego se cierra de golpe al cargar con una pila pequeña, sube el número (1024) o quita la línea. Para probar: `pila_hilos=512`. |
@@ -151,3 +153,31 @@ Escribe en una sola línea lo que decide cómo va el juego, para ver qué cambia
 | `waits` | Veces que un hilo esperó a que otro terminara con un bloque. |
 | `swap_out`, `swap_in` | Bloques mandados al SSD y traídos de vuelta en esos 2 s. Muchos `swap_in` seguidos = el juego necesita lo que se guardó (tirones). |
 | `probe_hits` | Bloques en vigilancia que el juego volvió a tocar. |
+
+## La línea `EDEN_TIMELINE2` (stderr.log, después de cada `EDEN_TIMELINE`)
+
+Dice en qué se fue el tiempo en esos mismos 2 s.
+
+| Campo | Qué es |
+|---|---|
+| `idle0` … `idle3` | Porcentaje del tiempo que cada núcleo del juego estuvo esperando trabajo. Cerca de 100 en un tirón: el juego espera algo (la GPU, el disco, el swap). Cerca de 0: el propio trabajo del juego es el límite. |
+| `swap_in_worst_ms` | La lectura del swap más lenta en esos 2 s. |
+| `submit`, `fence_wait`, `semaphore_wait`, `guest_fence`, `buffer_sync`, `texture_sync`, `present_sync`, `pipeline_wait`, `pipeline_build`, … | Solo con `medir=on`: milisegundos pasados en cada llamada de Vulkan que puede bloquear, y cuántas hubo (`ms/llamadas`). Se solapan entre hilos: no se suman. |
+
+## Medir todo de una vez: `medir=on`
+
+Una línea en `laboratorio.txt` enciende todo lo que hace falta para saber dónde se va el tiempo de un juego lento, con un coste pequeño:
+
+- los tiempos de Vulkan en `EDEN_TIMELINE2`;
+- el tiempo del hilo de la GPU por zonas, cada 10 s, en `eden_log.txt` (`GPU thread per second: | idle ... | draw ... | texture upload ...`);
+- las cifras del caché de texturas cada 60 fotogramas;
+- el registro de tirones a los 700 ms (una línea `tirones=N` lo cambia);
+- `eden_log.txt` escrito línea a línea, para que su final no se pierda al cerrar la app.
+
+Después de la prueba, en el PC, `tools/analyze-run.py` resume la carpeta de logs: fotogramas, tirones con los nombres de las funciones, swap, hilo de la GPU, caché de texturas, y un veredicto.
+
+```
+python3 tools/analyze-run.py CARPETA_DE_LOGS EglantinePS5-v1.000.000.elf
+```
+
+El `.elf` es el artefacto `EglantinePS5-symbols` de la compilación que se probó.

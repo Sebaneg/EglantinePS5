@@ -236,6 +236,9 @@ static void WaitFor(const char* what, const std::function<bool()>& done, int sec
 int main(int argc, char** argv) {
     if (argc < 2) return 2;
     setenv("EDEN_SWAP_COLD_SECONDS", "2", 1);
+    // The slots read back stay out of the swapper's reach for this long (swap_caliente): off for the
+    // cases below, which send the same slots out again and again; the last case turns it on.
+    setenv("EDEN_SWAP_HOT_SECONDS", "0", 1);
     Common::SetGuestMemorySwap(true, argv[1], 0);
     Common::SetGuestBlocksHigh(true); // juego_arriba=on: blocks through eden_direct_high
     constexpr std::size_t Size = std::size_t{256} << 20, Slots = Size / Common::SparseSlot, Written = 64;
@@ -354,6 +357,39 @@ int main(int argc, char** argv) {
     for (std::size_t slot = 0; slot < Written; ++slot)
         if (slot != 3 && !Verify(base, slot, 50)) return 1;
     std::printf("emergency: %zu MiB out at once, every byte back as written\n", rescued >> 20);
+
+    // Memory the game uses again stays in memory (swap_caliente=N): slots read back from the file
+    // are not sent out again while the pool stays short, the others are; an emergency still takes them.
+    Common::swap_hot_seconds.store(120);
+    mock::largest_override = std::int64_t{100} << 20; mock::free_override = std::int64_t{100} << 20;
+    const auto slot_state = [&](std::size_t slot) { return Common::GuestMemorySlotState(slot * Common::SparseSlot); };
+    WaitFor("slots 0 to 7 to be swapped", [&] {
+        for (std::size_t slot = 0; slot < 8; ++slot) if (slot != 3 && slot_state(slot) != 5) return false;
+        return true;
+    }, 30);
+    mock::largest_override = std::int64_t{3} << 30; mock::free_override = std::int64_t{3} << 30;
+    std::this_thread::sleep_for(std::chrono::milliseconds(600));
+    for (std::size_t slot = 0; slot < 8; ++slot)
+        if (slot != 3 && !Verify(base, slot, 50)) return 1; // read back: hot now
+    mock::largest_override = std::int64_t{100} << 20; mock::free_override = std::int64_t{100} << 20;
+    WaitFor("the cold slots to be swapped", [&] {
+        for (std::size_t slot = 8; slot < Written; ++slot) if (slot_state(slot) != 5) return false;
+        return true;
+    }, 30);
+    std::this_thread::sleep_for(std::chrono::seconds(4));
+    for (std::size_t slot = 0; slot < 8; ++slot)
+        if (slot != 3 && slot_state(slot) != 1) {
+            std::fprintf(stderr, "hot slot %zu went out again (state %d)\n", slot, slot_state(slot));
+            return 1;
+        }
+    mock::largest_override = std::int64_t{10} << 20;
+    if (eden_guest_memory_emergency(std::size_t{512} << 20) == 0) { std::fprintf(stderr, "emergency sent nothing\n"); return 1; }
+    for (std::size_t slot = 0; slot < 8; ++slot)
+        if (slot != 3 && slot_state(slot) != 5) { std::fprintf(stderr, "emergency left hot slot %zu\n", slot); return 1; }
+    mock::largest_override = std::int64_t{3} << 30; mock::free_override = std::int64_t{3} << 30;
+    for (std::size_t slot = 0; slot < Written; ++slot)
+        if (slot != 3 && !Verify(base, slot, 50)) return 1;
+    std::printf("hot: slots read back stayed in memory under a short pool, the cold ones went out, an emergency took all\n");
 
     Common::FreeGuestMemory(base, Size);
     if (mock::taken.load() > (std::size_t{64} << 20)) {

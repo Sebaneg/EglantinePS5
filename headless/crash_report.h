@@ -29,6 +29,10 @@ namespace Eden::Crash {
 struct NamedThread {
     std::atomic<std::uintptr_t> thread{0};
     char name[24]{};
+    // What the thread is doing in a call that can take long, and since when (monotonic ms):
+    // eden_doing.h, read by the hitch watch.
+    std::atomic<const char*> doing{nullptr};
+    std::atomic<unsigned long long> doing_since_ms{0};
 };
 inline constexpr unsigned kNamedThreads = 192;
 inline NamedThread named_threads[kNamedThreads];
@@ -44,6 +48,7 @@ inline void NameThread(const char* name) noexcept {
     // A full table starts over with its oldest entries.
     if (!entry) entry = &named_threads[named_thread_count.fetch_add(1, std::memory_order_relaxed) % kNamedThreads];
     entry->thread.store(0, std::memory_order_relaxed);
+    entry->doing.store(nullptr, std::memory_order_relaxed);
     std::size_t length = 0;
     for (; name && name[length] && length + 1 < sizeof(entry->name); ++length) entry->name[length] = name[length];
     entry->name[length] = '\0';

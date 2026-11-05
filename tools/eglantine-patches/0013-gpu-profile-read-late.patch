@@ -1,0 +1,34 @@
+diff --git a/src/video_core/nx2_profile.h b/src/video_core/nx2_profile.h
+index c53eafe..ff4666f 100644
+--- a/src/video_core/nx2_profile.h
++++ b/src/video_core/nx2_profile.h
+@@ -4,6 +4,7 @@
+ #pragma once
+ 
+ #include <array>
++#include <atomic>
+ #include <chrono>
+ #include <cstdlib>
+ #include <string>
+@@ -65,11 +66,18 @@ inline constexpr std::array<const char*, static_cast<size_t>(Zone::Count)> zone_
+     "fence skipped", "method", "split drain", "split wait",
+ };
+ 
+-// Read once at startup: Enabled() runs several times per method write (no guard to check).
+-inline const bool g_enabled = std::getenv("EDEN_NX2_GPU_PROFILE") != nullptr;
++// Read once, when the GPU thread first asks: by then the frontend may have set it (EglantinePS5's
++// lab file, medir=on), which a read at program start missed. Enabled() runs several times per
++// method write: one relaxed load once it is known.
++inline std::atomic<int> g_enabled{-1};
+ 
+ inline bool Enabled() {
+-    return g_enabled;
++    int enabled = g_enabled.load(std::memory_order_relaxed);
++    if (enabled < 0) {
++        enabled = std::getenv("EDEN_NX2_GPU_PROFILE") != nullptr ? 1 : 0;
++        g_enabled.store(enabled, std::memory_order_relaxed);
++    }
++    return enabled != 0;
+ }
+ 
+ // Nanoseconds; from the host's own counter where the wall clock reads it directly (the zones

@@ -1,0 +1,60 @@
+diff --git a/src/common/fs/file.h b/src/common/fs/file.h
+index b1ccfbd..99449e6 100644
+--- a/src/common/fs/file.h
++++ b/src/common/fs/file.h
+@@ -6,6 +6,7 @@
+ 
+ #pragma once
+ 
++#include <chrono>
+ #include <cstdio>
+ #include <filesystem>
+ #include <span>
+@@ -15,6 +16,22 @@
+ #include "common/fs/fs_types.h"
+ #include "common/fs/fs_util.h"
+ 
++// EglantinePS5: a read is marked for the frontend's hitch watch and timed for its timeline
++// (headless/eden_doing.h, performance.cpp). Weak: without the frontend they are null and skipped.
++#ifndef EDEN_DOING_DEFINED
++#define EDEN_DOING_DEFINED
++extern "C" {
++struct EdenDoing {
++    const char* what;
++    unsigned long long since_ms;
++    void* entry;
++};
++void eden_doing_begin(EdenDoing* save, const char* what) __attribute__((weak));
++void eden_doing_end(const EdenDoing* save) __attribute__((weak));
++}
++#endif
++extern "C" void eden_note_file_read(unsigned long long microseconds, unsigned long long bytes) __attribute__((weak));
++
+ namespace Common::FS {
+ 
+ enum class SeekOrigin {
+@@ -285,7 +302,23 @@ public:
+         if (!IsOpen()) {
+             return 0;
+         }
+-        return std::fread(data.data(), sizeof(T), data.size(), file);
++        EdenDoing doing{};
++        if (eden_doing_begin) {
++            eden_doing_begin(&doing, "reading a file (game data, from the SSD)");
++        }
++        const auto start = std::chrono::steady_clock::now();
++        const size_t read = std::fread(data.data(), sizeof(T), data.size(), file);
++        if (eden_note_file_read) {
++            eden_note_file_read(static_cast<unsigned long long>(
++                                    std::chrono::duration_cast<std::chrono::microseconds>(
++                                        std::chrono::steady_clock::now() - start)
++                                        .count()),
++                                static_cast<unsigned long long>(read * sizeof(T)));
++        }
++        if (eden_doing_end) {
++            eden_doing_end(&doing);
++        }
++        return read;
+     }
+ 
+     /**

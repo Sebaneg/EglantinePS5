@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "fastmem.h"
+#include "../headless/eden_doing.h"
 
 #ifdef PS5_NATIVE
 // Keep CPU heaps/tables and JIT views out of RADV's high-word-2 GPU window.
@@ -284,6 +285,7 @@ struct SparseRange {
     std::uint32_t* fine_after = nullptr; // per slot: the scan pass from which it may be made Fine again
     std::uint32_t* swap = nullptr;       // per slot: 1 + its place in the swap file, 0 none (guest_memory_service.inc)
     std::uint32_t* probe_at = nullptr;   // per slot: when it was put on probation (the swapper's clock, s)
+    std::uint32_t* hot_until = nullptr;  // per slot: the swapper leaves it alone until then (its clock, s)
     // lazy_zero: per zero run the range touches, 1 once its empty slots show the run (MapZeroOnFault).
     std::atomic<std::uint8_t>* zero_groups = nullptr;
     std::size_t first_group = 0;        // the run (address / run bytes) of zero_groups[0]
@@ -338,6 +340,7 @@ bool lazy_zero = false;
 // holes stay among its own blocks, and the graphics keep the bottom of the pool in one piece.
 std::atomic<bool> guest_blocks_high{false};
 int GuestDirect(std::size_t bytes, std::size_t alignment, std::int64_t* physical) {
+    EdenDoingScope doing{"guest memory: taking direct memory"};
     return guest_blocks_high.load(std::memory_order_relaxed) ? eden_direct_high(bytes, alignment, 12, physical)
                                                              : eden_direct_low(bytes, alignment, 12, physical);
 }
@@ -462,6 +465,8 @@ void ReleaseSparse(SparseRange& range) {
     range.swap = nullptr;
     delete[] range.probe_at;
     range.probe_at = nullptr;
+    delete[] range.hot_until;
+    range.hot_until = nullptr;
     range.begin.store(0, std::memory_order_release);
     delete[] range.zero_groups;
     range.zero_groups = nullptr;

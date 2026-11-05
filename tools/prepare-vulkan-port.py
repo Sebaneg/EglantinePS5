@@ -838,7 +838,13 @@ void GpuTimeCollect(const Device& device) {
 } // namespace
 '''
 adapt('src/video_core/renderer_vulkan/vk_scheduler.cpp', 'vulkan_scheduler.cpp', [
-    ('#include <memory>', '#include <memory>\n#include <array>\n#include <chrono>\n#include <cstdio>\n#include "dev_vulkan.h"'),
+    ('#include <memory>', '#include <memory>\n#include <array>\n#include <chrono>\n#include <cstdio>\n#include <optional>\n#include "dev_vulkan.h"\n#include "eden_doing.h"'),
+    # Presentation and sparse binding take the submit lock too: a wait for it shows as such in the
+    # hitch watch (eden_doing.h).
+    ('        std::scoped_lock lock{submit_mutex};\n        switch (const VkResult result = master_semaphore->SubmitQueue(',
+     '        std::optional<EdenDoingScope> lock_wait{std::in_place, "waiting for the submit lock"};\n'
+     '        std::scoped_lock lock{submit_mutex};\n        lock_wait.reset();\n'
+     '        switch (const VkResult result = master_semaphore->SubmitQueue('),
     ('namespace Vulkan {\n', 'namespace Vulkan {\n' + GPU_TIME_HELPERS),
     ('        .pInheritanceInfo = nullptr,\n    });\n    current_upload_cmdbuf = vk::CommandBuffer(command_pool->Commit(), device.GetDispatchLoader());',
      '        .pInheritanceInfo = nullptr,\n    });\n    GpuTimeBegin(device, current_cmdbuf);\n'
@@ -975,11 +981,14 @@ adapt('src/video_core/vulkan_common/vulkan_library.cpp', 'vulkan_library.cpp', [
     ('#if defined(__ANDROID__) && defined(ARCHITECTURE_arm64)', '#if defined(PS5_NATIVE)\n    return std::make_shared<Common::DynamicLibrary>();\n#elif defined(__ANDROID__) && defined(ARCHITECTURE_arm64)'),
 ])
 adapt('src/video_core/vulkan_common/vulkan_wrapper.h', 'include/video_core/vulkan_common/vulkan_wrapper.h', [
-    ('#include <array>', '#include <array>\n#include <cstdio>\n#include "performance.h"'),
-    ('return dld->vkQueueSubmit(queue,', 'auto timer = Eden::Performance::VulkanTimer(2);\n        return dld->vkQueueSubmit(queue,'),
-    ('return dld->vkQueueSubmit2(queue,', 'auto timer = Eden::Performance::VulkanTimer(2);\n        return dld->vkQueueSubmit2(queue,'),
-    ('return dld->vkWaitForFences(owner,', 'auto timer = Eden::Performance::VulkanTimer(3);\n        return dld->vkWaitForFences(owner,'),
-    ('const VkResult result = dld->vkWaitSemaphores(owner,', 'auto timer = Eden::Performance::VulkanTimer(4);\n        const VkResult result = dld->vkWaitSemaphores(owner,'),
+    # The calls that can block are marked for the hitch watch (eden_doing.h, lab file tirones=N).
+    ('#include <array>', '#include <array>\n#include <cstdio>\n#include "eden_doing.h"\n#include "performance.h"'),
+    ('return dld->vkQueueSubmit(queue,', 'auto timer = Eden::Performance::VulkanTimer(2);\n        EdenDoingScope doing{"vkQueueSubmit"};\n        return dld->vkQueueSubmit(queue,'),
+    ('return dld->vkQueueSubmit2(queue,', 'auto timer = Eden::Performance::VulkanTimer(2);\n        EdenDoingScope doing{"vkQueueSubmit2"};\n        return dld->vkQueueSubmit2(queue,'),
+    ('return dld->vkQueueBindSparse(queue,', 'EdenDoingScope doing{"vkQueueBindSparse"};\n        return dld->vkQueueBindSparse(queue,'),
+    ('return dld->vkQueuePresentKHR(queue,', 'EdenDoingScope doing{"vkQueuePresentKHR"};\n        return dld->vkQueuePresentKHR(queue,'),
+    ('return dld->vkWaitForFences(owner,', 'auto timer = Eden::Performance::VulkanTimer(3);\n        EdenDoingScope doing{"vkWaitForFences"};\n        return dld->vkWaitForFences(owner,'),
+    ('const VkResult result = dld->vkWaitSemaphores(owner,', 'auto timer = Eden::Performance::VulkanTimer(4);\n        EdenDoingScope doing{"vkWaitSemaphores"};\n        const VkResult result = dld->vkWaitSemaphores(owner,'),
     ('return dld->vkDeviceWaitIdle(handle);', 'auto timer = Eden::Performance::VulkanTimer(5);\n        return dld->vkDeviceWaitIdle(handle);'),
     ('''inline void Check(VkResult result) {
     if (result != VK_SUCCESS) {

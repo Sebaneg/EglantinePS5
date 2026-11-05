@@ -66,6 +66,7 @@ struct Defaults {
     ::Settings::ExtendedDynamicState dyna_state;
     ::Settings::VSyncMode vsync;
     bool async_presentation;
+    bool log_flush_line;
 };
 
 inline const Defaults& Initial() {
@@ -82,7 +83,8 @@ inline const Defaults& Initial() {
         ::Settings::values.accelerate_astc.GetValue(), ::Settings::values.astc_recompression.GetValue(),
         ::Settings::values.vertex_input_dynamic_state.GetValue(),
         ::Settings::values.gpu_clock.GetValue(), ::Settings::values.dyna_state.GetValue(),
-        ::Settings::values.vsync_mode.GetValue(), ::Settings::values.async_presentation.GetValue()};
+        ::Settings::values.vsync_mode.GetValue(), ::Settings::values.async_presentation.GetValue(),
+        ::Settings::values.log_flush_line.GetValue()};
     return d;
 }
 
@@ -123,6 +125,8 @@ inline void Restore() {
     ::Settings::values.dyna_state.SetValue(d.dyna_state);
     ::Settings::values.vsync_mode.SetValue(d.vsync);
     ::Settings::values.async_presentation.SetValue(d.async_presentation);
+    ::Settings::values.log_flush_line.SetValue(d.log_flush_line);
+    Performance::vulkan_cost_enabled = false;
     DevVulkan::present_frames = 0;
     DevVulkan::no_semaphore_latch = false;
     Common::SetGuestMemoryService(true, true, false);
@@ -228,6 +232,18 @@ inline bool ApplyEarly(const std::string& entry, bool& block_list_set) {
     // The thread a freeze report shows (crash_report.cpp FreezeWatch): GPU unless named here.
     else if (entry.starts_with("congelamiento_hilo=") && entry.size() > 19)
         SetVariable("EDEN_FREEZE_THREAD", entry.c_str() + 19);
+    // medir=on: what is needed to tell where a slow game's time goes, at a small cost. The Vulkan
+    // calls that can block, timed into EDEN_TIMELINE2 (performance.cpp); the GPU thread's time by
+    // zone every 10 s in eden_log.txt (Eglantine's Nx2Profile, read late by patch 0013); the texture
+    // cache's numbers every 60 frames; hitch samples after 700 ms (tirones=N still sets its own); and
+    // eden_log.txt written line by line, so that its end is there when the app is closed.
+    else if (entry == "medir=on") {
+        Performance::vulkan_cost_enabled = true;
+        SetVariable("EDEN_NX2_GPU_PROFILE", "1");
+        if (!std::getenv("EDEN_NX2_TC_LOG")) SetVariable("EDEN_NX2_TC_LOG", "60");
+        if (!std::getenv("EDEN_HITCH_MS")) SetVariable("EDEN_HITCH_MS", "700");
+        ::Settings::values.log_flush_line.SetValue(true);
+    }
     // Hitch samples (crash_report.cpp HitchWatch): after N ms (300 to 10000) without a game frame,
     // where the GPU, Vulkan and guest core threads are, in EDEN_HITCH lines. Read as the game starts.
     else if (entry.starts_with("tirones=") && Number(entry, 8, n) && n >= 300 && n <= 10000)
@@ -279,6 +295,10 @@ inline bool ApplyEarly(const std::string& entry, bool& block_list_set) {
         Common::SetGuestMemorySwap(entry.ends_with("on"), path.c_str(), 0);
     } else if (entry.starts_with("swap_frio=") && Number(entry, 10, n) && n >= 2 && n <= 120)
         SetVariable("EDEN_SWAP_COLD_SECONDS", entry.c_str() + 10);
+    // swap_caliente=N: seconds a block read back from the swap file stays in memory (a quarter of it
+    // for one touched on probation); 0 to 3600, 120 without the line, 0 as before. Read as the game starts.
+    else if (entry.starts_with("swap_caliente=") && Number(entry, 14, n) && n <= 3600)
+        SetVariable("EDEN_SWAP_HOT_SECONDS", entry.c_str() + 14);
     else if (entry.starts_with("reserva_juego=") && Number(entry, 14, n))
         Common::SetGuestMemoryReserve(static_cast<std::size_t>(n));
     else if (entry == "bloques_repetidos=on" || entry == "bloques_repetidos=off")

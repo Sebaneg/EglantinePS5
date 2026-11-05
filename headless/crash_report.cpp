@@ -2,6 +2,7 @@
 // The crash report (crash_report.h). What the handler runs is in this file and uses only system
 // calls, atomics and the buffers below.
 #include "crash_report.h"
+#include "eden_doing.h"
 
 #include <signal.h>
 #include <algorithm>
@@ -596,6 +597,12 @@ void FreezeWatch() {
 // and 480 lines per game. tools/symbolize-crash.py reads the eboot+0x addresses.
 constexpr const char* kHitchThreads[] = {"GPU",       "VulkanWorker", "GPUFencingThread", "VulkanPresent",
                                          "CPUCore_0", "CPUCore_1",    "CPUCore_2",        "CPUCore_3"};
+unsigned long long MonotonicMs() noexcept {
+    timespec now{};
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return static_cast<unsigned long long>(now.tv_sec) * 1000ULL + static_cast<unsigned long long>(now.tv_nsec) / 1000000ULL;
+}
+
 std::atomic<std::uintptr_t> hitch_target{0};
 std::atomic<bool> hitch_done{false};
 Text<768> hitch_line;
@@ -694,10 +701,27 @@ void HitchWatch() {
             handler = true;
         }
         if (rounds++ == 0) ++stalls;
+        // What a thread marked itself as doing (eden_doing.h): " doing=WHAT for=N ms".
+        const auto doing = [](const NamedThread& entry, char* out, std::size_t size) {
+            const char* what = entry.doing.load(std::memory_order_acquire);
+            if (!what) {
+                out[0] = '\0';
+                return false;
+            }
+            const unsigned long long since = entry.doing_since_ms.load(std::memory_order_relaxed);
+            const unsigned long long now = MonotonicMs();
+            std::snprintf(out, size, " doing=\"%s\" for_ms=%llu", what, now > since ? now - since : 0);
+            return true;
+        };
+        char doing_text[160];
         for (const char* name : kHitchThreads) {
             std::uintptr_t thread = 0;
+            const NamedThread* found_entry = nullptr;
             for (const NamedThread& entry : named_threads)
-                if (!std::strcmp(entry.name, name)) thread = entry.thread.load(std::memory_order_acquire);
+                if (!std::strcmp(entry.name, name)) {
+                    thread = entry.thread.load(std::memory_order_acquire);
+                    found_entry = &entry;
+                }
             if (thread == 0) continue;
             hitch_done.store(false, std::memory_order_relaxed);
             hitch_target.store(thread, std::memory_order_release);
@@ -709,8 +733,21 @@ void HitchWatch() {
                 }
             }
             hitch_target.store(0, std::memory_order_release);
-            std::fprintf(stderr, "EDEN_HITCH n=%u still_ms=%llu frames=%llu %s%s\n", stalls, still, frames, name,
-                         answered ? hitch_line.data : " did not answer");
+            doing(*found_entry, doing_text, sizeof(doing_text));
+            std::fprintf(stderr, "EDEN_HITCH n=%u still_ms=%llu frames=%llu %s%s%s\n", stalls, still, frames, name,
+                         answered ? hitch_line.data : " did not answer", doing_text);
+            ++lines;
+        }
+        // Any other named thread inside a long call (the swapper, the guest memory scanner, the
+        // GPU's back half, a guest thread's helper): one line each, without a signal.
+        for (const NamedThread& entry : named_threads) {
+            if (entry.thread.load(std::memory_order_acquire) == 0 || !doing(entry, doing_text, sizeof(doing_text)))
+                continue;
+            bool sampled = false;
+            for (const char* name : kHitchThreads) sampled = sampled || !std::strcmp(entry.name, name);
+            if (sampled) continue;
+            std::fprintf(stderr, "EDEN_HITCH n=%u still_ms=%llu frames=%llu %s busy%s\n", stalls, still, frames,
+                         entry.name, doing_text);
             ++lines;
         }
         std::fflush(stderr);
@@ -835,3 +872,37 @@ Last TakeLast(const std::string& logs_folder, const std::string& eden_log) {
 }
 
 } // namespace Eden::Crash
+
+// eden_doing.h: what a named thread is doing in a long call. A table lookup and atomic stores,
+// safe in a signal handler (the guest memory fault handler marks its swap reads).
+namespace {
+Eden::Crash::NamedThread* FindSelf() noexcept {
+    const auto self = (std::uintptr_t)pthread_self();
+    const unsigned count = std::min(Eden::Crash::named_thread_count.load(std::memory_order_relaxed),
+                                    Eden::Crash::kNamedThreads);
+    for (unsigned i = 0; i < count; ++i)
+        if (Eden::Crash::named_threads[i].thread.load(std::memory_order_relaxed) == self)
+            return &Eden::Crash::named_threads[i];
+    return nullptr;
+}
+} // namespace
+
+extern "C" void eden_doing_begin(EdenDoing* save, const char* what) {
+    Eden::Crash::NamedThread* entry = FindSelf();
+    save->entry = entry;
+    if (!entry) return;
+    save->what = entry->doing.load(std::memory_order_relaxed);
+    save->since_ms = entry->doing_since_ms.load(std::memory_order_relaxed);
+    entry->doing_since_ms.store(Eden::Crash::MonotonicMs(), std::memory_order_relaxed);
+    entry->doing.store(what, std::memory_order_release);
+}
+
+extern "C" void eden_doing_end(const EdenDoing* save) {
+    auto* entry = static_cast<Eden::Crash::NamedThread*>(save->entry);
+    if (!entry) return;
+    entry->doing_since_ms.store(save->since_ms, std::memory_order_relaxed);
+    entry->doing.store(save->what, std::memory_order_release);
+}
+
+// For code outside the app's headless part (src/guest_memory_service.inc): names its threads.
+extern "C" void eden_name_thread(const char* name) { Eden::Crash::NameThread(name); }

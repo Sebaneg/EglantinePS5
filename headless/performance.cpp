@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "performance.h"
 #include "crash_report.h"
+#include "eden_doing.h"
 #include "stall_watchdog.h"
 #include "../src/fastmem.h"
 #include "common/cpu_features.h"
@@ -370,6 +371,66 @@ extern "C" std::int32_t sceKernelDirectMemoryQuery(std::int64_t, int, DirectMemo
 // the heap, the JIT's code and the rest (the GPU's), and what the guest's memory did in those 2 s
 // (slots written for the first time, waits for a slot, slots sent to the swap file and read back,
 // probation slots touched again). Its own thread: it goes on while a game hardly draws a frame.
+// EDEN_TIMELINE2, after each EDEN_TIMELINE: where the time went in those 2 s. The guest's four cores:
+// the share of the time each waited for work (idle0..3, % : near 0 the game's CPU work is the
+// limit, near 100 it waits for something else). The slowest read back from the swap file. With the
+// lab file's medir=on, the Vulkan calls that can block, in ms spent in those 2 s and calls made
+// (they overlap across threads): submits, waits for the GPU, the caches' syncs, pipeline builds.
+extern "C" unsigned long long eden_swap_in_worst_take_us(void) __attribute__((weak));
+// The slowest look at the pool by PoolWatch (RefreshFreeMemory), for EDEN_TIMELINE2.
+static std::atomic<unsigned long long> pool_query_worst_us{0};
+// Reads of files (the game's data from the SSD; Eglantine's common/fs/file.h, patch 0014): count,
+// bytes and the slowest, for EDEN_TIMELINE2.
+static std::atomic<unsigned long long> file_reads{0}, file_read_bytes{0}, file_read_worst_us{0};
+extern "C" void eden_note_file_read(unsigned long long microseconds, unsigned long long bytes) {
+    file_reads.fetch_add(1, std::memory_order_relaxed);
+    file_read_bytes.fetch_add(bytes, std::memory_order_relaxed);
+    for (unsigned long long worst = file_read_worst_us.load(std::memory_order_relaxed);
+         microseconds > worst &&
+         !file_read_worst_us.compare_exchange_weak(worst, microseconds, std::memory_order_relaxed);) {}
+}
+static void TimelineDetail(std::chrono::steady_clock::duration since_start, double seconds) {
+    static unsigned long long last_idle[4] = {};
+    static unsigned long long last_api_ns[24] = {}, last_api_calls[24] = {};
+    char line[1024];
+    int used = std::snprintf(line, sizeof(line), "EDEN_TIMELINE2 t=%.0f",
+                             std::chrono::duration<double>(since_start).count());
+    const auto put = [&](const char* format, auto... values) {
+        if (used >= 0 && static_cast<std::size_t>(used) < sizeof(line))
+            used += std::snprintf(line + used, sizeof(line) - static_cast<std::size_t>(used), format, values...);
+    };
+    for (unsigned core = 0; core < 4; ++core) {
+        const unsigned long long idle = guest_idle[core].nanoseconds.load(std::memory_order_relaxed);
+        const double share = seconds > 0 ? (idle - last_idle[core]) / (seconds * 1e9) * 100.0 : 0.0;
+        put(" idle%u=%.0f", core, share > 100.0 ? 100.0 : share);
+        last_idle[core] = idle;
+    }
+    put(" swap_in_worst_ms=%llu", eden_swap_in_worst_take_us ? eden_swap_in_worst_take_us() / 1000 : 0ULL);
+    put(" pool_query_worst_ms=%llu", pool_query_worst_us.exchange(0, std::memory_order_relaxed) / 1000);
+    put(" file_reads=%llu file_read_mib=%.1f file_read_worst_ms=%llu",
+        file_reads.exchange(0, std::memory_order_relaxed),
+        file_read_bytes.exchange(0, std::memory_order_relaxed) / 1048576.0,
+        file_read_worst_us.exchange(0, std::memory_order_relaxed) / 1000);
+    if (vulkan_cost_enabled.load(std::memory_order_relaxed)) {
+        // The calls of vulkan_api (performance.h ReportVulkan) worth a look in a stall.
+        static constexpr struct { unsigned index; const char* name; } kShown[] = {
+            {2, "submit"}, {3, "fence_wait"}, {4, "semaphore_wait"}, {5, "device_idle"}, {6, "guest_fence"},
+            {7, "buffer_sync"}, {8, "texture_sync"}, {9, "present_sync"}, {10, "descriptor_sync"},
+            {12, "astc_submit"}, {13, "texture_gc"}, {14, "texture_download"}, {16, "pipeline_wait"},
+            {0, "pipeline_build"}, {1, "compute_build"}, {17, "shader_prepare"}};
+        for (const auto& shown : kShown) {
+            const unsigned long long ns = vulkan_api[shown.index].nanoseconds.load(std::memory_order_relaxed);
+            const unsigned long long calls = vulkan_api[shown.index].calls.load(std::memory_order_relaxed);
+            if (calls != last_api_calls[shown.index])
+                put(" %s=%.0fms/%llu", shown.name, (ns - last_api_ns[shown.index]) / 1e6,
+                    calls - last_api_calls[shown.index]);
+            last_api_ns[shown.index] = ns;
+            last_api_calls[shown.index] = calls;
+        }
+    }
+    std::fprintf(stderr, "%s\n", line);
+}
+
 static void TimelineLoop() {
     const auto started = std::chrono::steady_clock::now();
     unsigned last_frames = Eden::Performance::frames_shown.load(std::memory_order_relaxed);
@@ -423,15 +484,42 @@ static void TimelineLoop() {
                      (unsigned long long)(counts[4] - last[4]));
         last_frames = frames;
         for (int i = 0; i < 5; ++i) last[i] = counts[i];
+        TimelineDetail(now - started, seconds);
     }
 }
 
 // The largest free block of direct memory is what the next graphics allocation needs. Looked at
 // again every 100 ms; called on the GPU thread by the texture collector (KeepDirtyTextures).
 static std::atomic<unsigned long long> largest_free_block{0};
+static void RefreshFreeMemoryNow();
+extern "C" void eden_name_thread(const char* name) __attribute__((weak));
+// The pool's state is looked at on a thread of its own (PoolWatch, every 100 ms): the callers (the
+// texture and buffer caches, on the GPU thread, holding the rasterizer's lock) only read what it found.
+// Mario Kart World froze for good after a track's preview video: the GPU thread sat for 30 s in the
+// system's direct memory query, called from the texture cache's TickFrame, and the guest's cores
+// waited for the rasterizer's lock it held; the hitch samples had caught it there for seconds at a
+// time before. The heap's trim (memory given back) runs there too, no longer on the GPU thread.
 static void RefreshFreeMemory() {
-    static std::once_flag timeline_started;
-    std::call_once(timeline_started, [] { std::thread(TimelineLoop).detach(); });
+    static std::once_flag started;
+    std::call_once(started, [] {
+        std::thread(TimelineLoop).detach();
+        std::thread([] {
+            if (eden_name_thread) eden_name_thread("PoolWatch");
+            for (;;) {
+                const long long start = NowNs();
+                {
+                    EdenDoingScope doing{"pool: asking the system for free memory"};
+                    RefreshFreeMemoryNow();
+                }
+                const auto took = static_cast<unsigned long long>((NowNs() - start) / 1000);
+                for (unsigned long long worst = pool_query_worst_us.load(std::memory_order_relaxed);
+                     took > worst && !pool_query_worst_us.compare_exchange_weak(worst, took, std::memory_order_relaxed);) {}
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+        }).detach();
+    });
+}
+static void RefreshFreeMemoryNow() {
     static std::atomic<long long> checked_ns{0};
     const long long now = NowNs();
     if (const long long last = checked_ns.load(std::memory_order_relaxed); last != 0 && now - last < 100'000'000)
