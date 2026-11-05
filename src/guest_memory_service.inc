@@ -258,7 +258,7 @@ void ReturnSlot(SparseRange& range, std::size_t slot) noexcept {
     if (state == SlotFine) {
         const std::size_t kept = FineKept(range, slot);
 #ifdef PS5_NATIVE
-        if (!MapSlot(at, PROT_READ, zero_block)) std::abort();
+        if (!MapZero(at, 1)) std::abort();
         if (kept != 0 && sceKernelReleaseDirectMemory(range.physical[slot], kept * FinePage) != 0) std::abort();
 #else
         if (madvise(reinterpret_cast<void*>(at), SparseSlot, MADV_DONTNEED) != 0) std::abort();
@@ -269,7 +269,7 @@ void ReturnSlot(SparseRange& range, std::size_t slot) noexcept {
         return;
     }
 #ifdef PS5_NATIVE
-    if (!MapSlot(at, PROT_READ, zero_block)) std::abort();
+    if (!MapZero(at, 1)) std::abort();
     if (state == SlotShared) {
         if (UnshareBlock(range.physical[slot]) == 0) {
             if (sceKernelReleaseDirectMemory(range.physical[slot], SparseSlot) != 0) std::abort();

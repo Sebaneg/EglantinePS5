@@ -303,25 +303,54 @@ extern "C" int eden_direct_low(std::size_t size, std::size_t alignment, int type
 #endif
 
 #ifdef PS5_NATIVE
+// The slots no one wrote read the zero run, read-only: ZeroRunSlots blocks of zeroes in a row, so
+// that as many zero slots in a row are one mapping, not one each. Each slot maps the part of the run
+// its address falls on (ZeroFor), so neighbours stay one range of the run. A process may hold only
+// so many mappings: one zero block for every slot took ~7000 of them for a game's memory alone, and
+// Mario Kart World's driver was refused mappings (0x8002000C) with a gigabyte free. zero_run_slots
+// stays 1 (the run is then one block) unless the start-up check of a split run passes.
+constexpr std::size_t ZeroRunSlots = 16;
+std::size_t zero_run_slots = 1;
 std::int64_t zero_block = -1;
 
-// A 2 MiB block of direct memory, zeroed through a mapping of its own that is gone again.
-bool ZeroedBlock(std::int64_t* physical) {
-    if (eden_direct_low(SparseSlot, SparseSlot, 12, physical) != 0)
+// `bytes` of direct memory, zeroed through a mapping of its own that is gone again.
+bool ZeroedSpan(std::int64_t* physical, std::size_t bytes) {
+    if (eden_direct_low(bytes, SparseSlot, 12, physical) != 0)
         return false;
     void* view = reinterpret_cast<void*>(cpu_mapping_hint);
-    if (sceKernelMapDirectMemory(&view, SparseSlot, PROT_READ | PROT_WRITE, 0, *physical, SparseSlot) != 0) {
-        (void)sceKernelReleaseDirectMemory(*physical, SparseSlot);
+    if (sceKernelMapDirectMemory(&view, bytes, PROT_READ | PROT_WRITE, 0, *physical, SparseSlot) != 0) {
+        (void)sceKernelReleaseDirectMemory(*physical, bytes);
         return false;
     }
-    std::memset(view, 0, SparseSlot);
-    if (munmap(view, SparseSlot) != 0) std::abort();
+    std::memset(view, 0, bytes);
+    if (munmap(view, bytes) != 0) std::abort();
     return true;
+}
+// A 2 MiB block of direct memory, zeroed.
+bool ZeroedBlock(std::int64_t* physical) {
+    return ZeroedSpan(physical, SparseSlot);
 }
 bool MapSlot(std::uintptr_t at, int protection, std::int64_t physical) {
     void* address = reinterpret_cast<void*>(at);
     return sceKernelMapDirectMemory(&address, SparseSlot, protection, MAP_FIXED, physical, SparseSlot) == 0 &&
            address == reinterpret_cast<void*>(at);
+}
+// The part of the zero run the slot at `at` shows.
+std::int64_t ZeroFor(std::uintptr_t at) {
+    return zero_block + static_cast<std::int64_t>((at / SparseSlot) % zero_run_slots * SparseSlot);
+}
+// `slots` slots from `at` read zeroes: one read-only mapping per stretch that stays inside one run.
+bool MapZero(std::uintptr_t at, std::size_t slots) {
+    while (slots != 0) {
+        const std::size_t in_run = std::min(slots, zero_run_slots - (at / SparseSlot) % zero_run_slots);
+        void* address = reinterpret_cast<void*>(at);
+        if (sceKernelMapDirectMemory(&address, in_run * SparseSlot, PROT_READ, MAP_FIXED, ZeroFor(at), SparseSlot) != 0 ||
+            address != reinterpret_cast<void*>(at))
+            return false;
+        at += in_run * SparseSlot;
+        slots -= in_run;
+    }
+    return true;
 }
 #endif
 
@@ -335,12 +364,9 @@ void* ReserveSparse(std::size_t span, [[maybe_unused]] bool guest = false) {
         (void)munmap(address, span);
         return nullptr;
     }
-    const auto start = reinterpret_cast<std::uintptr_t>(address);
-    for (std::size_t offset = 0; offset < span; offset += SparseSlot) {
-        if (!MapSlot(start + offset, PROT_READ, zero_block)) {
-            (void)munmap(address, span);
-            return nullptr;
-        }
+    if (!MapZero(reinterpret_cast<std::uintptr_t>(address), span / SparseSlot)) {
+        (void)munmap(address, span);
+        return nullptr;
     }
     return address;
 #else
@@ -400,6 +426,54 @@ void ReleaseSparse(SparseRange& range) {
     range.physical = nullptr;
 }
 
+std::size_t zero_run_slots_reported() {
+#ifdef PS5_NATIVE
+    return zero_run_slots;
+#else
+    return 1;
+#endif
+}
+
+#ifdef PS5_NATIVE
+// The zero run's check, with zero_run_slots set to the run: two runs' worth reserved hold one whole
+// run in one mapping; a slot in its middle takes a block of its own (the mapping is split), is
+// written, read, and shows its part of the run again, and its neighbours read zero throughout.
+const char* ZeroRunWorks() {
+    const std::size_t run_bytes = zero_run_slots * SparseSlot;
+    void* reserved = ReserveSparse(2 * run_bytes);
+    if (reserved == nullptr) return "run-reserve";
+    const std::uintptr_t base = (reinterpret_cast<std::uintptr_t>(reserved) + run_bytes - 1) / run_bytes * run_bytes;
+    const std::size_t words = SparseSlot / sizeof(std::uint64_t);
+    auto* const slot = reinterpret_cast<volatile std::uint64_t*>(base + 5 * SparseSlot);
+    const auto zero_around = [&] {
+        const auto* const first = reinterpret_cast<volatile std::uint64_t*>(base);
+        const auto* const last = reinterpret_cast<volatile std::uint64_t*>(base + run_bytes) - 1;
+        return first[0] == 0 && last[0] == 0 && slot[-1] == 0 && slot[words] == 0;
+    };
+    const char* result = "ok";
+    std::int64_t physical = -1;
+    if (!zero_around() || slot[0] != 0) {
+        result = "run-zero-read";
+    } else if (!OwnSlot(reinterpret_cast<std::uintptr_t>(slot), &physical)) {
+        result = "run-split";
+    } else {
+        slot[0] = 0x5a17ed5a17ed5a17ull;
+        slot[words - 1] = 0x1234567890abcdefull;
+        if (slot[0] != 0x5a17ed5a17ed5a17ull || slot[words - 1] != 0x1234567890abcdefull || !zero_around())
+            result = "run-own-read";
+        if (munmap(const_cast<std::uint64_t*>(slot), SparseSlot) != 0 ||
+            sceKernelReleaseDirectMemory(physical, SparseSlot) != 0)
+            std::abort();
+        if (std::strcmp(result, "ok") == 0 &&
+            (!MapZero(reinterpret_cast<std::uintptr_t>(slot), 1) || slot[0] != 0 || slot[words - 1] != 0 ||
+             !zero_around()))
+            result = "run-zero-again";
+    }
+    if (munmap(reserved, 2 * run_bytes) != 0) std::abort();
+    return result;
+}
+#endif
+
 // Once: can tables be sparse here? On the console this is a check of the three mapping steps
 // above with real memory; a refusal leaves the tables dense, as they were before.
 bool SparseAvailable() {
@@ -410,13 +484,27 @@ bool SparseAvailable() {
     if (state != 0) return state == 1;
     bool ok = true;
     const char* step = "ok";
+    [[maybe_unused]] const char* run_step = "off";
 #ifdef PS5_NATIVE
     ok = !DevSetting("sparse_tables=off");
     if (!ok) step = "switched-off";
     if (ok) {
         (void)sceKernelEnableDmemAliasing(); // reports zero regardless; the mappings below are the check
-        ok = ZeroedBlock(&zero_block);
-        if (!ok) step = "zero-block";
+        // The zero run, kept only if a slot inside one mapping of it can take a block of its own and
+        // read zeroes again (ZeroRunWorks); otherwise one zero block per slot, as before.
+        if (ZeroedSpan(&zero_block, ZeroRunSlots * SparseSlot)) {
+            zero_run_slots = ZeroRunSlots;
+            run_step = ZeroRunWorks();
+            if (std::strcmp(run_step, "ok") != 0) {
+                zero_run_slots = 1;
+                (void)sceKernelReleaseDirectMemory(zero_block + static_cast<std::int64_t>(SparseSlot),
+                                                   (ZeroRunSlots - 1) * SparseSlot);
+            }
+        } else {
+            run_step = "no-room";
+            ok = ZeroedBlock(&zero_block);
+            if (!ok) step = "zero-block";
+        }
     }
 #endif
     if (ok) {
@@ -446,7 +534,7 @@ bool SparseAvailable() {
                 if (munmap(const_cast<std::uint64_t*>(probe) + words, SparseSlot) != 0 ||
                     sceKernelReleaseDirectMemory(physical, SparseSlot) != 0)
                     std::abort();
-                if (!MapSlot(reinterpret_cast<std::uintptr_t>(probe) + SparseSlot, PROT_READ, zero_block) ||
+                if (!MapZero(reinterpret_cast<std::uintptr_t>(probe) + SparseSlot, 1) ||
                     probe[words] != 0 || probe[2 * words - 1] != 0) {
                     ok = false;
                     step = "shared-zero";
@@ -456,8 +544,9 @@ bool SparseAvailable() {
             if (munmap(const_cast<std::uint64_t*>(probe), 2 * SparseSlot) != 0) std::abort();
         }
     }
-    char line[96];
-    const int length = std::snprintf(line, sizeof(line), "EDEN_SPARSE_TABLES available=%d step=%s\n", ok ? 1 : 0, step);
+    char line[128];
+    const int length = std::snprintf(line, sizeof(line), "EDEN_SPARSE_TABLES available=%d step=%s zero_run=%zu (%s)\n",
+                                     ok ? 1 : 0, step, zero_run_slots_reported(), run_step);
     if (length > 0) Report(line);
     sparse_state.store(ok ? 1 : 2, std::memory_order_release);
     return ok;

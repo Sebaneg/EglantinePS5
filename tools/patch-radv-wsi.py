@@ -95,7 +95,9 @@ radv_ps5_memory_grant_gpu(void *address, uint64_t bytes)
                             PS5_KERNEL_PROT_CPU_READ | PS5_KERNEL_PROT_CPU_WRITE | PS5_KERNEL_PROT_GPU_READ |
                                PS5_KERNEL_PROT_GPU_WRITE) == 0;
 }''', (root/'tools/radv-host-memory.inc').read_text().strip()),
-        ('   if (!placed) {', '   if (!placed) {\n      fprintf(stderr, "radv/ps5: mapping rejected result=%d address=%p bytes=%llu window32=%d\\n", result, address, (unsigned long long)bytes, window32);'),
+        ('static struct radv_ps5_granules radv_ps5_region;\n',
+         (root/'tools/radv-mapping-report.inc').read_text()),
+        ('   if (!placed) {', '   if (!placed) {\n      fprintf(stderr, "radv/ps5: mapping rejected result=%d address=%p bytes=%llu window32=%d\\n", result, address, (unsigned long long)bytes, window32);\n      radv_ps5_report_space();'),
     ],
 }.items():
     original = root.parent/'mihawk-mesa-review'/relative
