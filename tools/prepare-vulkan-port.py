@@ -586,7 +586,39 @@ adapt('src/video_core/vulkan_common/vulkan_memory_allocator.cpp', 'vulkan_memory
 # 480 MiB free. No Finish() when releasing: a buffer handed out earlier may not have its copy recorded.
 adapt('src/video_core/renderer_vulkan/vk_staging_buffer_pool.cpp', 'vulkan_staging_buffer_pool.cpp', [
     ('#include "video_core/vulkan_common/vulkan_wrapper.h"\n',
-     '#include "video_core/vulkan_common/vulkan_wrapper.h"\n#include <atomic>\n#include <cstdio>\n#include "staging_buffers.h"\n'),
+     '#include "video_core/vulkan_common/vulkan_wrapper.h"\n#include <atomic>\n#include <cstdio>\n#include <cstdlib>\n'
+     '#include "performance.h"\n#include "staging_buffers.h"\n'),
+    # While the pool the CPU shares with the GPU is short, every kept buffer the GPU is done with
+    # goes at each frame, not only when a buffer is refused: Mario Kart World held 218 MiB of them
+    # as its race loaded, given back only after the allocation that ended the session had failed.
+    # EDEN_STAGING_KEEP_WHEN_SHORT=1 keeps them as before.
+    ('    ReleaseCache(MemoryUsage::Download);\n}\n',
+     '    ReleaseCache(MemoryUsage::Download);\n'
+     '    static const bool keep_when_short = [] {\n'
+     '        const char* value = std::getenv("EDEN_STAGING_KEEP_WHEN_SHORT");\n'
+     '        return value != nullptr && value[0] == \'1\';\n'
+     '    }();\n'
+     '    if (!keep_when_short && ::Eden::Performance::graphics_memory_short.load(std::memory_order_relaxed)) {\n'
+     '        const auto idle = [this](const StagingBuffer& entry) {\n'
+     '            return !entry.deferred && scheduler.IsFree(entry.tick);\n'
+     '        };\n'
+     '        ::Eden::StagingBuffers::Released released;\n'
+     '        for (StagingBuffersCache* const cache : {&device_local_cache, &upload_cache, &download_cache}) {\n'
+     '            for (StagingBuffers& level : *cache) {\n'
+     '                released += ::Eden::StagingBuffers::ReleaseFrom(level, idle);\n'
+     '            }\n'
+     '        }\n'
+     '        static std::atomic<unsigned long long> times{0};\n'
+     '        if (released.buffers != 0) {\n'
+     '            const auto count = times.fetch_add(1, std::memory_order_relaxed) + 1;\n'
+     '            if ((count & (count - 1)) == 0) {\n'
+     '                std::fprintf(stderr, "EDEN_STAGING_SHORT released %zu idle buffers (%llu MiB) while the pool "\n'
+     '                             "was short (%llu times so far)\\n", released.buffers,\n'
+     '                             static_cast<unsigned long long>(released.bytes >> 20), count);\n'
+     '            }\n'
+     '        }\n'
+     '    }\n'
+     '}\n'),
     ('    const auto is_free = [this](const StagingBuffer& entry) {\n'
      '        return !entry.deferred && scheduler.IsFree(entry.tick);\n'
      '    };',
@@ -1407,8 +1439,9 @@ probes = {
 }
 for name, index, expected in (
     ('vk_fence_manager', 6, 1), ('vk_buffer_cache', 7, 3),
-    # vk_texture_cache: the second is Eglantine patch 0006's wait between ASTC pieces.
-    ('vk_texture_cache', 8, 2), ('vk_swapchain', 9, 6),
+    # vk_texture_cache: the second is Eglantine patch 0006's wait between ASTC pieces, the third
+    # patch 0010's wait for decode images past EDEN_NX2_TRANSCODE_INFLIGHT_MIB.
+    ('vk_texture_cache', 8, 3), ('vk_swapchain', 9, 6),
     ('vk_descriptor_buffer', 10, 2), ('vk_multi_range_buffer', 11, 1),
     ('vk_compute_pass', 12, 1),
 ):

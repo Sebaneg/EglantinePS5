@@ -1,0 +1,37 @@
+diff --git a/src/video_core/renderer_vulkan/vk_update_descriptor.cpp b/src/video_core/renderer_vulkan/vk_update_descriptor.cpp
+--- a/src/video_core/renderer_vulkan/vk_update_descriptor.cpp
++++ b/src/video_core/renderer_vulkan/vk_update_descriptor.cpp
+@@ -4,6 +4,7 @@
+ // SPDX-FileCopyrightText: Copyright 2019 yuzu Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <cstdlib>
+ #include <variant>
+ #include <boost/container/static_vector.hpp>
+ 
+@@ -16,11 +17,23 @@
+ 
+ namespace Vulkan {
+ 
++namespace {
++// EDEN_DESCRIPTOR_QUEUE_DIV=N (1 to 8): each frame's descriptor payload is 1/N of its size. The
++// guest queue's eight frames of 0x80000 entries are 96 MiB of the pool the CPU shares with the GPU
++// on the PS5; a frame that fills a smaller one waits for the worker and starts it again.
++size_t ScaledPayload(size_t size) {
++    const char* value = std::getenv("EDEN_DESCRIPTOR_QUEUE_DIV");
++    const unsigned long divisor = value != nullptr ? std::strtoul(value, nullptr, 10) : 1;
++    return divisor >= 1 && divisor <= 8 ? size / divisor : size;
++}
++} // namespace
++
+ UpdateDescriptorQueue::UpdateDescriptorQueue(const Device& device_, size_t frame_payload_size_,
+                                              bool supports_descriptor_buffer_)
+-    : device{device_}, frame_payload_size{frame_payload_size_},
++    : device{device_}, frame_payload_size{ScaledPayload(frame_payload_size_)},
+       supports_descriptor_buffer{supports_descriptor_buffer_},
+-      payload(std::make_unique_for_overwrite<DescriptorUpdateEntry[]>(frame_payload_size_ * FRAMES_IN_FLIGHT))
++      payload(std::make_unique_for_overwrite<DescriptorUpdateEntry[]>(ScaledPayload(frame_payload_size_) *
++                                                                       FRAMES_IN_FLIGHT))
+ {
+     payload_start = payload.get();
+     payload_cursor = payload.get();

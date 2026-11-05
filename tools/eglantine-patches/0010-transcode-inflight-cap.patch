@@ -1,0 +1,69 @@
+diff --git a/src/video_core/renderer_vulkan/vk_texture_cache.cpp b/src/video_core/renderer_vulkan/vk_texture_cache.cpp
+--- a/src/video_core/renderer_vulkan/vk_texture_cache.cpp
++++ b/src/video_core/renderer_vulkan/vk_texture_cache.cpp
+@@ -4935,6 +4935,53 @@
+         free_transcodes.erase(reusable);
+         pending.chunk_views.clear(); // the GPU is done with them
+     } else {
++        // Decode images live until the GPU is past the frame that used them, and a frame that
++        // brings many textures in made one for each: as title 1's race loaded, dozens of RGBA8
++        // images (4 bytes a pixel, eight times the BC1 they become) took 1.7 GB in a second and a
++        // half, and the session ended. EDEN_NX2_TRANSCODE_INFLIGHT_MIB (default 192; 0: no limit)
++        // caps them: past it the kept ones go first, then the GPU is waited for and the finished
++        // ones go as well, before another is made.
++        static const u64 inflight_limit = [] {
++            const char* value = std::getenv("EDEN_NX2_TRANSCODE_INFLIGHT_MIB");
++            return (value != nullptr ? std::strtoull(value, nullptr, 10) : 192ULL) << 20;
++        }();
++        if (inflight_limit != 0) {
++            const auto image_bytes = [](u32 w, u32 h, u32 lv, u32 ly) {
++                u64 bytes{};
++                for (u32 level = 0; level < lv; ++level) {
++                    bytes += u64{(std::max)(w >> level, 1U)} * (std::max)(h >> level, 1U) * 4;
++                }
++                return bytes * ly;
++            };
++            const auto held = [&] {
++                u64 bytes{};
++                for (const PendingTranscode& t : pending_transcodes) {
++                    bytes += image_bytes(t.width, t.height, t.levels, t.layers);
++                }
++                for (const PendingTranscode& t : free_transcodes) {
++                    bytes += image_bytes(t.width, t.height, t.levels, t.layers);
++                }
++                return bytes;
++            };
++            const u64 wanted = image_bytes(width, height, levels, layers);
++            if (held() + wanted > inflight_limit && !free_transcodes.empty()) {
++                free_transcodes.clear();
++            }
++            if (held() + wanted > inflight_limit && !pending_transcodes.empty()) {
++                scheduler.Finish();
++                while (!pending_transcodes.empty() &&
++                       scheduler.IsFree(pending_transcodes.front().tick)) {
++                    pending_transcodes.pop_front();
++                }
++                ++transcode_waits;
++                if ((transcode_waits & (transcode_waits - 1)) == 0) {
++                    LOG_INFO(Render_Vulkan,
++                             "ASTC transcode waited for the GPU to free decode images ({} times, "
++                             "limit {} MiB)",
++                             transcode_waits, inflight_limit >> 20);
++                }
++            }
++        }
+         pending = PendingTranscode{
+             .tick = 0,
+             .image = memory_allocator.CreateImage(VkImageCreateInfo{
+diff --git a/src/video_core/renderer_vulkan/vk_texture_cache.h b/src/video_core/renderer_vulkan/vk_texture_cache.h
+--- a/src/video_core/renderer_vulkan/vk_texture_cache.h
++++ b/src/video_core/renderer_vulkan/vk_texture_cache.h
+@@ -302,6 +302,8 @@
+     std::deque<PendingTranscode> pending_transcodes;
+     /// Decode images the GPU is done with, for the next texture of the same shape.
+     std::vector<PendingTranscode> free_transcodes;
++    /// Times a transcode waited for the GPU to free decode images (EDEN_NX2_TRANSCODE_INFLIGHT_MIB).
++    u64 transcode_waits{};
+ 
+     std::optional<BlockLinearUnswizzle3DPass> bl3d_unswizzle_pass;
+     const Settings::ResolutionScalingInfo& resolution;

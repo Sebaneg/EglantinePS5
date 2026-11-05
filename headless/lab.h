@@ -175,6 +175,14 @@ inline bool ApplyEarly(const std::string& entry, bool& block_list_set) {
     // The smallest zone zonas_gpu_trozos takes (MiB, 286 to 1024; 1024 without this line).
     // The most device memory one layered terrain texture binds (MiB, 128 to 768; read once per app
     // start, Eglantine patch 0009).
+    // The most memory ASTC conversion keeps in decode images (MiB, 0 to 2048; 192 without this
+    // line, 0: no limit), read once per app start (Eglantine patch 0010).
+    // The descriptor queues' payload, divided by N (1 to 8; 1 without this line): 96 MiB at 1, 24 at 4
+    // (Eglantine patch 0011). Read when the renderer starts.
+    else if (entry.starts_with("cola_descriptores=") && Number(entry, 18, n) && n >= 1 && n <= 8)
+        SetVariable("EDEN_DESCRIPTOR_QUEUE_DIV", entry.c_str() + 18);
+    else if (entry.starts_with("astc_temporal=") && Number(entry, 14, n) && n <= 2048)
+        SetVariable("EDEN_NX2_TRANSCODE_INFLIGHT_MIB", entry.c_str() + 14);
     else if (entry.starts_with("capas_max=") && Number(entry, 10, n) && n >= 128 && n <= 768)
         SetVariable("EDEN_NX2_LAYERS_CAP_MIB", entry.c_str() + 10);
     else if (entry.starts_with("zonas_gpu_minimo=") && Number(entry, 17, n) && n >= 286 && n <= 1024)
