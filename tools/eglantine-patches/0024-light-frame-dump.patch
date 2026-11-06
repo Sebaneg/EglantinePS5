@@ -1,5 +1,5 @@
 diff --git a/src/video_core/renderer_vulkan/vk_frame_dump.cpp b/src/video_core/renderer_vulkan/vk_frame_dump.cpp
-index 747f985..f0df185 100644
+index 747f985..b583e6b 100644
 --- a/src/video_core/renderer_vulkan/vk_frame_dump.cpp
 +++ b/src/video_core/renderer_vulkan/vk_frame_dump.cpp
 @@ -9,6 +9,8 @@
@@ -11,7 +11,7 @@ index 747f985..f0df185 100644
  
  #include <fmt/format.h>
  
-@@ -31,10 +33,32 @@ namespace {
+@@ -31,10 +33,51 @@ namespace {
  
  using VideoCore::Surface::PixelFormat;
  
@@ -26,27 +26,46 @@ index 747f985..f0df185 100644
 +    const char* const value = std::getenv(name);
 +    return (value != nullptr && *value != '\0' ? std::strtoull(value, nullptr, 10) : fallback) << 20;
 +}
-+const size_t SIZE_CAP = EnvMiB("EDEN_NX2_FRAME_DUMP_CAP_MIB", 2048);
-+const size_t IMAGE_CAP = EnvMiB("EDEN_NX2_FRAME_DUMP_IMAGE_MIB", 0);
-+const bool WAIT_WRITER = std::getenv("EDEN_NX2_FRAME_DUMP_STAGING_MIB") != nullptr;
-+// EDEN_NX2_FRAME_DUMP_TARGETS=0: what passes and dispatches write is listed, not read back (only
-+// the sampled textures and the presented frame are): a capture of minutes takes seconds.
-+const bool TARGETS = [] {
-+    const char* const value = std::getenv("EDEN_NX2_FRAME_DUMP_TARGETS");
-+    return value == nullptr || *value != '0';
-+}();
-+const bool ONCE = [] {
-+    const char* const value = std::getenv("EDEN_NX2_FRAME_DUMP_ONCE");
-+    return value != nullptr && *value != '\0' && *value != '0';
-+}();
++// Read on first use, during the capture: the lab file sets them as the game starts, after this
++// file's static initializers ran. EDEN_NX2_FRAME_DUMP_TARGETS=0: what passes and dispatches
++// write is listed, not read back (only the sampled textures and the presented frame are).
++size_t SizeCap() {
++    static const size_t value = EnvMiB("EDEN_NX2_FRAME_DUMP_CAP_MIB", 2048);
++    return value;
++}
++size_t ImageCap() {
++    static const size_t value = EnvMiB("EDEN_NX2_FRAME_DUMP_IMAGE_MIB", 0);
++    return value;
++}
++bool WaitWriter() {
++    static const bool value = std::getenv("EDEN_NX2_FRAME_DUMP_STAGING_MIB") != nullptr;
++    return value;
++}
++bool Targets() {
++    static const bool value = [] {
++        const char* const env = std::getenv("EDEN_NX2_FRAME_DUMP_TARGETS");
++        return env == nullptr || *env != '0';
++    }();
++    return value;
++}
++bool Once() {
++    static const bool value = [] {
++        const char* const env = std::getenv("EDEN_NX2_FRAME_DUMP_ONCE");
++        return env != nullptr && *env != '\0' && *env != '0';
++    }();
++    return value;
++}
  /// RecordingSampledTextures: a sampled capture is running.
  std::atomic<bool> recording_sampled{};
 -constexpr size_t STAGING_BUDGET = size_t{256} << 20;
-+const size_t STAGING_BUDGET = EnvMiB("EDEN_NX2_FRAME_DUMP_STAGING_MIB", 256);
++size_t StagingBudget() {
++    static const size_t value = EnvMiB("EDEN_NX2_FRAME_DUMP_STAGING_MIB", 256);
++    return value;
++}
  
  template <typename T>
  T Load(const u8* pixel, int index) {
-@@ -328,7 +352,7 @@ std::optional<FrameDump::Target> FrameDump::MakeTarget(ImageView& view, u32 slot
+@@ -328,7 +371,7 @@ std::optional<FrameDump::Target> FrameDump::MakeTarget(ImageView& view, u32 slot
      const u32 width = rescaled ? resolution.ScaleUp(info.size.width) : info.size.width;
      const u32 height = rescaled ? resolution.ScaleUp(info.size.height) : info.size.height;
      const u32 level = static_cast<u32>(view.range.base.level);
@@ -55,13 +74,13 @@ index 747f985..f0df185 100644
          .slot = slot,
          .image = image->Handle(),
          .format = BytesPerBlock(view.format) == BytesPerBlock(info.format) ? view.format
-@@ -344,6 +368,18 @@ std::optional<FrameDump::Target> FrameDump::MakeTarget(ImageView& view, u32 slot
+@@ -344,6 +387,18 @@ std::optional<FrameDump::Target> FrameDump::MakeTarget(ImageView& view, u32 slot
          .msaa = info.num_samples > 1,
          .depth_encoding = depth_encoding,
      };
 +    // Over EDEN_NX2_FRAME_DUMP_IMAGE_MIB: the next mip levels down, while the image has them.
-+    while (IMAGE_CAP != 0 &&
-+           size_t{target.width} * target.height * target.depth * TexelBytes(target) > IMAGE_CAP &&
++    while (ImageCap() != 0 &&
++           size_t{target.width} * target.height * target.depth * TexelBytes(target) > ImageCap() &&
 +           target.level + 1 < info.resources.levels) {
 +        ++target.level;
 +        target.width = std::max(1U, target.width >> 1);
@@ -74,11 +93,11 @@ index 747f985..f0df185 100644
  }
  
  u32 FrameDump::TexelBytes(const Target& target) {
-@@ -410,6 +446,16 @@ std::optional<std::pair<GPUVAddr, u32>> SampledKey(const FrameDump::Sampled& tex
+@@ -410,6 +465,16 @@ std::optional<std::pair<GPUVAddr, u32>> SampledKey(const FrameDump::Sampled& tex
  bool FrameDump::RecordSampled(const Sampled& texture, u32 index, std::string name,
                                std::string tags) {
      tags += SamplerJson(texture.sampler);
-+    if (ONCE) {
++    if (Once()) {
 +        const auto key = std::make_tuple(static_cast<const void*>(texture.view->BackingImage()),
 +                                         texture.view->range.base.level,
 +                                         texture.view->range.base.layer);
@@ -91,11 +110,11 @@ index 747f985..f0df185 100644
      if (const auto target = MakeTarget(*texture.view, index)) {
          return Record(*target, std::move(name), std::move(tags));
      }
-@@ -530,6 +576,14 @@ bool FrameDump::EndPass() {
+@@ -530,6 +595,14 @@ bool FrameDump::EndPass() {
      }
      bool recorded = false;
      for (const Target& target : pass_targets) {
-+        if (!TARGETS) {
++        if (!Targets()) {
 +            Enqueue({.tags = fmt::format(
 +                         R"({{"name":"{:04}_pass{:03}_d{}-{}_rt{}","kind":"pass","pass":{},"first_draw":{},"draw_count":{},"slot":{},"shaders":[{}],"format":"{}","width":{},"height":{},"gpu_addr":"{:#x}","skipped":"targets"}})",
 +                         sequence++, pass_index, pass_first_draw, draws, target.slot, pass_index,
@@ -106,34 +125,54 @@ index 747f985..f0df185 100644
          recorded |= Record(
              target,
              fmt::format("{:04}_pass{:03}_d{}-{}_rt{}", sequence++, pass_index, pass_first_draw,
-@@ -546,7 +600,7 @@ void FrameDump::CaptureDispatch(u64 shader_hash, std::span<ImageView* const> wri
+@@ -546,7 +619,7 @@ void FrameDump::CaptureDispatch(u64 shader_hash, std::span<ImageView* const> wri
      const u32 dispatch = dispatches++;
      for (u32 slot = 0; slot < written.size(); ++slot) {
          const auto target = written[slot] ? MakeTarget(*written[slot], slot) : std::nullopt;
 -        if (!target) {
-+        if (!target || !TARGETS) {
++        if (!target || !Targets()) {
              continue;
          }
          Record(*target,
-@@ -574,6 +628,11 @@ bool FrameDump::Record(const Target& target, std::string name, std::string tags)
+@@ -574,7 +647,12 @@ bool FrameDump::Record(const Target& target, std::string name, std::string tags)
          return false;
      }
      const size_t size = size_t{target.width} * target.height * target.depth * TexelBytes(target);
-+    if (IMAGE_CAP != 0 && size > IMAGE_CAP) {
+-    if (recorded_bytes + size > SIZE_CAP) {
++    if (ImageCap() != 0 && size > ImageCap()) {
 +        Enqueue({.tags = fmt::format(R"({{"name":"{}",{},"skipped":"size","bytes":{}}})", name,
 +                                     tags, size)});
 +        return false;
 +    }
-     if (recorded_bytes + size > SIZE_CAP) {
++    if (recorded_bytes + size > SizeCap()) {
          truncated = true;
          return false;
-@@ -697,6 +756,17 @@ void FrameDump::Drain() {
+     }
+@@ -628,7 +706,7 @@ bool FrameDump::Record(const Target& target, std::string name, std::string tags)
+ }
+ 
+ bool FrameDump::RecordBuffer(VkBuffer source, u32 offset, u32 size, std::string tags) {
+-    if (recorded_bytes + size > SIZE_CAP) {
++    if (recorded_bytes + size > SizeCap()) {
+         truncated = true;
+         return false;
+     }
+@@ -673,7 +751,7 @@ bool FrameDump::RecordBuffer(VkBuffer source, u32 offset, u32 size, std::string
+ }
+ 
+ void FrameDump::DrainIfFull() {
+-    if (pending_bytes >= STAGING_BUDGET) {
++    if (pending_bytes >= StagingBudget()) {
+         Drain();
+     }
+ }
+@@ -697,6 +775,17 @@ void FrameDump::Drain() {
      }
      readbacks.clear();
      pending_bytes = 0;
 +    // A light capture: this batch on disk before the next is read back, so the copies waiting
 +    // for the writer never hold more than one batch of memory.
-+    while (WAIT_WRITER) {
++    while (WaitWriter()) {
 +        {
 +            std::scoped_lock lock{queue_mutex};
 +            if (queue.empty()) {
@@ -145,7 +184,16 @@ index 747f985..f0df185 100644
  }
  
  void FrameDump::Enqueue(Job job) {
-@@ -866,6 +936,7 @@ void FrameDump::TickFrame() {
+@@ -727,7 +816,7 @@ void FrameDump::WriterLoop() {
+             manifest.close();
+             LOG_INFO(Render_Vulkan, "Frame dump done: {} images, {}, {} MiB in {}{}", images,
+                      job.tags, written_bytes >> 20, directory.string(),
+-                     job.truncated ? fmt::format(" (stopped at the {} GiB cap)", SIZE_CAP >> 30)
++                     job.truncated ? fmt::format(" (stopped at the {} GiB cap)", SizeCap() >> 30)
+                                    : "");
+             if (const u64 id = schedule.CaptureId(); id != 0) {
+                 VideoCore::Nx2Debug::FinishCapture(id, {});
+@@ -866,6 +955,7 @@ void FrameDump::TickFrame() {
      std::error_code error;
      std::filesystem::create_directories(directory, error);
      manifest.open(directory / "manifest.jsonl", std::ios::trunc);
@@ -153,7 +201,7 @@ index 747f985..f0df185 100644
      if (!manifest) {
          LOG_ERROR(Render_Vulkan, "Frame dump: cannot write {}", directory.string());
          if (const u64 id = schedule.CaptureId(); id != 0) {
-@@ -887,7 +958,8 @@ void FrameDumpSchedule::Configure(std::string_view at, std::filesystem::path tri
+@@ -887,7 +977,8 @@ void FrameDumpSchedule::Configure(std::string_view at, std::filesystem::path tri
                                    bool sampled_) {
      enabled = true;
      sampled = sampled_;
