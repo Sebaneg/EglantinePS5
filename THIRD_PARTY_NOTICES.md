@@ -12,7 +12,7 @@ builds on the following projects, each under its own license.
   simpleini, sirit, SPIRV-Headers, Vulkan-Headers, Vulkan-Utility-Libraries,
   Vulkan Memory Allocator, ENet, frozen, cpp-httplib, nlohmann/json, and the time
   zone data. Each keeps its upstream license.
-- **[Zortos Eglantine fork](https://github.com/zortos293/Eglantine)**,
+- **[Lichii](https://github.com/zortos293/Lichii)** (zortos293's Eglantine fork, renamed),
   GPL-3.0-or-later. Referenced directly by the `Eglantine` submodule, including its
   core, native shader, readback, service, runtime and test changes.
 - **[Catch2](https://github.com/catchorg/Catch2)**, BSL-1.0. Used by the focused

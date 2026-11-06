@@ -1,16 +1,16 @@
 diff --git a/src/video_core/buffer_cache/buffer_cache.h b/src/video_core/buffer_cache/buffer_cache.h
-index 2716abf..e0f4c72 100644
+index a248222..a741143 100644
 --- a/src/video_core/buffer_cache/buffer_cache.h
 +++ b/src/video_core/buffer_cache/buffer_cache.h
-@@ -9,6 +9,7 @@
- #include "video_core/buffer_cache/uniform_cache_history.h"
+@@ -10,6 +10,7 @@
  
  #include <algorithm>
+ #include <atomic>
 +#include <cstdlib>
  #include <memory>
  #include <numeric>
  #include <stdexcept>
-@@ -2125,7 +2126,44 @@ BufferId BufferCache<P>::CreateBuffer(DAddr device_addr, u32 wanted_size,
+@@ -2401,7 +2402,44 @@ BufferId BufferCache<P>::CreateBuffer(DAddr device_addr, u32 wanted_size,
      DAddr device_addr_end = Common::AlignUp(device_addr + wanted_size, CACHING_PAGESIZE);
      device_addr = Common::AlignDown(device_addr, CACHING_PAGESIZE);
      wanted_size = static_cast<u32>(device_addr_end - device_addr);

@@ -1,17 +1,17 @@
 diff --git a/src/video_core/nx2_profile.h b/src/video_core/nx2_profile.h
-index c53eafe..ff4666f 100644
+index 8e567f4..fa91bf7 100644
 --- a/src/video_core/nx2_profile.h
 +++ b/src/video_core/nx2_profile.h
-@@ -4,6 +4,7 @@
- #pragma once
+@@ -5,6 +5,7 @@
  
+ #include <algorithm>
  #include <array>
 +#include <atomic>
- #include <chrono>
- #include <cstdlib>
- #include <string>
-@@ -65,11 +66,18 @@ inline constexpr std::array<const char*, static_cast<size_t>(Zone::Count)> zone_
-     "fence skipped", "method", "split drain", "split wait",
+ #ifdef _MSC_VER
+ #include <intrin.h>
+ #elif defined(ARCHITECTURE_x86_64)
+@@ -76,11 +77,18 @@ inline constexpr std::array<const char*, static_cast<size_t>(Zone::Count)> zone_
+     "writer wait", "list submit wait", "list GPU wait",
  };
  
 -// Read once at startup: Enabled() runs several times per method write (no guard to check).

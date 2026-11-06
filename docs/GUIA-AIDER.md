@@ -9,7 +9,7 @@ Esta guía es para un asistente de código (Aider) que trabaja en este repositor
 ## 1. Qué es EglantinePS5
 
 - Es un **emulador de Nintendo Switch 2 que corre como app nativa (homebrew) en una PS5 con jailbreak**.
-- El núcleo del emulador es **Eglantine**, una variante de **Eden** (emulador de Switch) que soporta Switch 2. Está en el submódulo `Eglantine/` (https://github.com/zortos293/Eglantine).
+- El núcleo del emulador es **Lichii** (antes llamado Eglantine, de zortos293), una variante de **Eden** (emulador de Switch) que soporta Switch 2. Está en el submódulo `Eglantine/` (https://github.com/zortos293/Lichii, rama `nx2`; desde noviembre de 2026 en la build 88, commit `55532f2`).
 - EglantinePS5 aporta:
   - el "frontend" para PS5 (`headless/`);
   - el lanzador con menús;
@@ -152,13 +152,14 @@ Se aplican en orden numérico. No existe el 0002, y el 0020 se quitó; los hueco
 | 0013 | Lectura tardía del perfil de la GPU (Nx2Profile). |
 | 0014 | Lecturas de archivos marcadas y cronometradas. |
 | 0015 | Límite al juntar búferes (`bufer_max`, 256 MiB por defecto; de viejunerd). |
-| 0016 | Saltar revisiones de búferes sin cambios (de viejunerd; se apaga con `atajos_bufer=off`). |
+| ~~0016~~ | *Quitado* al pasar a Lichii, que ya se salta los búferes sin cambios. `atajos_bufer=off` ya no hace nada. |
 | 0017 | El segundo hilo de la GPU ya no se queda dormido (de viejunerd). |
 | 0018 | Stub del comando 201 de vi2. |
 | 0019 | Log de búferes grandes. |
 | ~~0020~~ | *Quitado*: hacía que el juego se cerrara al cargar con la GPU en dos hilos (SIGSEGV en `Scheduler::SubmitExecution`). |
 | 0021 | **Terrenos en BC3/BC1** en lugar de RGBA8 (ver 7.1). Opción `terrenos_bc=off|bc1`. |
 | 0022 | **La caché de texturas conserva las texturas usadas en los últimos 2 s** (ver 7.2). Opción `texturas_recientes=N`. |
+| 0023 | El búfer de índices solo se sincroniza desde `first` (el menú pedía 2,3 GB y se cerraba), y las subidas de búfer grandes van en trozos de 128 MB (`EDEN_BUFFER_UPLOAD_PIECE_MIB`). |
 
 ### Cómo crear o regenerar un parche
 - La copia de trabajo en Windows tiene **finales de línea CRLF** en algunos archivos (por ejemplo `vk_texture_cache.h`, `texture_cache_base.h`) y LF en otros. Los parches deben ir **en LF**.

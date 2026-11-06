@@ -1,0 +1,82 @@
+diff --git a/src/video_core/buffer_cache/buffer_cache.h b/src/video_core/buffer_cache/buffer_cache.h
+index d7a9e92..c21690c 100644
+--- a/src/video_core/buffer_cache/buffer_cache.h
++++ b/src/video_core/buffer_cache/buffer_cache.h
+@@ -900,7 +900,15 @@ void BufferCache<P>::BindHostIndexBuffer() {
+         }
+     }
+     if (draw_state.inline_index_draw_indexes.empty()) {
+-        SynchronizeBuffer(buffer, channel_state->index_buffer.device_addr, size);
++        // EglantinePS5: only the indices the draw reads, from `first` on. The binding runs from
++        // the start of the game's index pool, and Mario Kart World draws from far into one: its
++        // menu asked for a 2.3 GB staging buffer for the whole pool and the session ended.
++        const u32 first_bytes =
++            draw_state.index_buffer.first * u32(draw_state.index_buffer.FormatSizeInBytes());
++        if (first_bytes < size) {
++            SynchronizeBuffer(buffer, channel_state->index_buffer.device_addr + first_bytes,
++                              size - first_bytes);
++        }
+     } else {
+         if constexpr (USE_MEMORY_MAPS_FOR_UPLOADS) {
+             auto upload_staging = runtime.UploadStagingBuffer(size);
+@@ -2389,6 +2397,60 @@ void BufferCache<P>::MappedUploadMemory([[maybe_unused]] Buffer& buffer,
+                                         [[maybe_unused]] u64 total_size_bytes,
+                                         [[maybe_unused]] std::span<BufferCopy> copies) {
+     if constexpr (USE_MEMORY_MAPS) {
++        // EglantinePS5: an upload larger than EDEN_BUFFER_UPLOAD_PIECE_MIB (default 128; 0: no
++        // limit) goes in pieces, waiting for the GPU between them so each piece's staging memory
++        // is free for the next: one staging buffer for it all (2.3 GB in Mario Kart World's menu)
++        // did not fit and the session ended.
++        static const u64 piece_limit = [] {
++            const char* value = std::getenv("EDEN_BUFFER_UPLOAD_PIECE_MIB");
++            return (value != nullptr ? std::strtoull(value, nullptr, 10) : 128ULL) << 20;
++        }();
++        if constexpr (requires { runtime.Finish(); }) {
++            if (piece_limit != 0 && total_size_bytes > piece_limit) {
++                std::vector<BufferCopy> pieces;
++                for (const BufferCopy& copy : copies) {
++                    for (u64 done = 0; done < copy.size; done += piece_limit) {
++                        pieces.push_back(BufferCopy{
++                            .src_offset = 0,
++                            .dst_offset = copy.dst_offset + done,
++                            .size = (std::min)(piece_limit, copy.size - done),
++                        });
++                    }
++                }
++                static u32 logged{};
++                if (logged++ < 16) {
++                    LOG_WARNING(HW_GPU, "Buffer upload of {} MiB in pieces of {} MiB",
++                                total_size_bytes >> 20, piece_limit >> 20);
++                }
++                size_t first = 0;
++                while (first < pieces.size()) {
++                    u64 bytes = 0;
++                    size_t last = first;
++                    while (last < pieces.size() && bytes + pieces[last].size <= piece_limit) {
++                        pieces[last].src_offset = bytes;
++                        bytes += pieces[last].size;
++                        ++last;
++                    }
++                    const std::span<BufferCopy> group(pieces.data() + first, last - first);
++                    auto upload_staging = runtime.UploadStagingBuffer(bytes);
++                    for (BufferCopy& copy : group) {
++                        const DAddr device_addr = buffer.CpuAddr() + copy.dst_offset;
++                        device_memory.ReadBlockUnsafe(
++                            device_addr, upload_staging.mapped_span.data() + copy.src_offset,
++                            copy.size);
++                        uploaded_buffer_ranges.emplace_back(device_addr, copy.size);
++                        copy.src_offset += upload_staging.offset;
++                    }
++                    runtime.CopyBuffer(buffer, upload_staging.buffer, group, true,
++                                       runtime.CanReorderUpload(buffer, group));
++                    first = last;
++                    if (first < pieces.size()) {
++                        runtime.Finish();
++                    }
++                }
++                return;
++            }
++        }
+         auto upload_staging = runtime.UploadStagingBuffer(total_size_bytes);
+         const std::span<u8> staging_pointer = upload_staging.mapped_span;
+         for (BufferCopy& copy : copies) {

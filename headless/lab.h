@@ -328,9 +328,9 @@ inline bool ApplyEarly(const std::string& entry, bool& block_list_set) {
     // swap_comprimido=off: slots sent out go to the swap file only, not compressed into memory first
     // (src/guest_memory_service.inc, "The swap in memory"). Read as the game starts.
     else if (entry == "swap_comprimido=off") SetVariable("EDEN_SWAP_COMPRESS", "0");
-    // atajos_bufer=off: the buffer cache checks every page of every bound range again at each draw,
-    // as before Eglantine patch 0016 (from viejunerd/Eglantine-PS5-, their 0017). Read once.
-    else if (entry == "atajos_bufer=off") SetVariable("EDEN_NX2_DRAW_TUNING", "0");
+    // atajos_bufer=off: no effect since Lichii (Eglantine patch 0016 left: Lichii skips clean buffers
+    // itself); kept so older lab files still read.
+    else if (entry == "atajos_bufer=off") {}
     // gpu_dos_hilos=off: the GPU thread stays one thread even with gpu_accuracy=low (EDEN_NX2_SPLIT=0).
     else if (entry == "gpu_dos_hilos=off") SetVariable("EDEN_NX2_SPLIT", "0");
     // terrenos_bc=off|bc1: the huge ASTC arrays (title 1's 8192x8192x68 terrain) stay RGBA8 on the host as
@@ -414,6 +414,11 @@ inline bool ApplyLate(const std::string& entry) {
     else if (entry == "cpu_accuracy=auto") ::Settings::values.cpu_accuracy = ::Settings::CpuAccuracy::Auto;
     else if (entry == "dma_accuracy=unsafe") ::Settings::values.dma_accuracy.SetValue(::Settings::DmaAccuracy::Unsafe);
     else if (entry == "dma_accuracy=default") ::Settings::values.dma_accuracy.SetValue(::Settings::DmaAccuracy::Default);
+    // mkw_30fps=on: Mario Kart World runs its own 30 FPS frame mode (the one of its split screen), with the
+    // game at full speed: half the frames to make for each second of play. mkw_fps_dinamico=on: the game
+    // picks 60 or 30 from its whole frame time (experimental). Read when the game loads (loader/nso.cpp).
+    else if (entry == "mkw_30fps=on") ::Settings::values.mkw_30fps.SetValue(true);
+    else if (entry == "mkw_fps_dinamico=on") ::Settings::values.mkw_dynamic_fps.SetValue(true);
     else return false;
     return true;
 }

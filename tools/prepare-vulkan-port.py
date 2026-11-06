@@ -62,8 +62,10 @@ constexpr VkPipelineStageFlags COMPUTE_CONSUMER_STAGES =
 } // namespace
 
 void RasterizerVulkan::DispatchCompute() {"""),
-    ('        scheduler.RequestOutsideRenderPassOperationContext();\n        scheduler.Record([pipeline, indirect_buffer = buffer->Handle(),',
+    # Lichii (build 83+) traces the compute pipeline before it records the dispatch.
+    ('        scheduler.RequestOutsideRenderPassOperationContext();\n        scheduler.TraceComputePipeline(pipeline->ShaderHash());\n',
      """        scheduler.RequestOutsideRenderPassOperationContext();
+        scheduler.TraceComputePipeline(pipeline->ShaderHash());
         if (::Eden::DevVulkan::compute_barriers) {
             scheduler.Record([](vk::CommandBuffer cmdbuf) {
                 cmdbuf.PipelineBarrier(vk::PIPELINE_STAGE_GRAPHICS_COMPUTE_TRANSFER,
@@ -71,15 +73,15 @@ void RasterizerVulkan::DispatchCompute() {"""),
                                        0, COMPUTE_INPUT_BARRIER);
             });
         }
-        scheduler.Record([pipeline, indirect_buffer = buffer->Handle(),"""),
+"""),
     ('            cmdbuf.DispatchIndirect(indirect_buffer, indirect_offset);\n',
      """            cmdbuf.DispatchIndirect(indirect_buffer, indirect_offset);
             if (::Eden::DevVulkan::compute_barriers)
                 cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, COMPUTE_CONSUMER_STAGES, 0,
                                        COMPUTE_WRITE_BARRIER);
 """),
-    ('        cmdbuf.Dispatch(dim[0], dim[1], dim[2]);\n',
-     """        cmdbuf.Dispatch(dim[0], dim[1], dim[2]);
+    ('                               [&] { cmdbuf.Dispatch(dim[0], dim[1], dim[2]); });\n',
+     """                               [&] { cmdbuf.Dispatch(dim[0], dim[1], dim[2]); });
         if (::Eden::DevVulkan::compute_barriers)
             cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, COMPUTE_CONSUMER_STAGES, 0,
                                    COMPUTE_WRITE_BARRIER);
@@ -163,19 +165,26 @@ void RasterizerVulkan::DispatchCompute() {"""),
     }
     ::Eden::Performance::Mark(::Eden::Performance::draw_config, phase);
 '''),
+    # Lichii (build 83+) traces the graphics pipeline inside the record scope.
     ('''    query_cache.CounterEnable(VideoCommon::QueryType::ZPassPixelCount64, maxwell3d->regs.zpass_pixel_count_enable);
     {
         Profile::Scope scope{Profile::Zone::DrawRecord};
-        draw_func();
-    }
+        scheduler.TraceGraphicsPipeline(pipeline->ShaderHashes());
 ''',
      '''    query_cache.CounterEnable(VideoCommon::QueryType::ZPassPixelCount64, maxwell3d->regs.zpass_pixel_count_enable);
     ::Eden::Performance::Mark(::Eden::Performance::draw_state, phase);
     {
         Profile::Scope scope{Profile::Zone::DrawRecord};
-        draw_func();
+        scheduler.TraceGraphicsPipeline(pipeline->ShaderHashes());
+'''),
+    ('''        draw_func();
+    }
+    submitted = true;
+''',
+     '''        draw_func();
     }
     ::Eden::Performance::Mark(::Eden::Performance::draw_record, phase);
+    submitted = true;
 '''),
     # A forced release blocks the GPU thread until the fence thread has retired
     # every older fence. Time only that producer-side drain.
@@ -852,15 +861,15 @@ adapt('src/video_core/renderer_vulkan/vk_scheduler.cpp', 'vulkan_scheduler.cpp',
      '        .pInheritanceInfo = nullptr,\n    });\n    GpuTimeBegin(device, current_cmdbuf);\n'
      '    current_upload_cmdbuf = vk::CommandBuffer(command_pool->Commit(), device.GetDispatchLoader());'),
     # Eden's own frame trace sits between the upload buffer's End and the command buffer's.
-    ('            ++trace_gpu_skipped;\n        }\n        cmdbuf.End();\n',
-     '            ++trace_gpu_skipped;\n        }\n        GpuTimeEnd(cmdbuf);\n        cmdbuf.End();\n'),
+    ('        if (trace_query_pool) {\n            trace_work = {};\n        }\n        cmdbuf.End();\n',
+     '        if (trace_query_pool) {\n            trace_work = {};\n        }\n        GpuTimeEnd(cmdbuf);\n        cmdbuf.End();\n'),
     ('            trace_frame_end = 0;\n        }\n    });\n    chunk->MarkSubmit();',
      '            trace_frame_end = 0;\n        }\n        GpuTimeCollect(device);\n    });\n    chunk->MarkSubmit();'),
     ('    const u64 signal_value = SubmitExecution(signal_semaphore, wait_semaphore);\n'
-     '    AllocateNewContext();\n    return signal_value;',
+     '    AllocateNewContext();\n    last_flush = std::chrono::steady_clock::now();',
      '    const u64 signal_value = SubmitExecution(signal_semaphore, wait_semaphore);\n'
      '    if (::Eden::DevVulkan::sync_submissions) {\n        Wait(signal_value);\n    }\n'
-     '    AllocateNewContext();\n    return signal_value;'),
+     '    AllocateNewContext();\n    last_flush = std::chrono::steady_clock::now();'),
 ])
 adapt('src/video_core/renderer_vulkan/pipeline_helper.h',
       'include/video_core/renderer_vulkan/pipeline_helper.h', [
@@ -1193,10 +1202,10 @@ configure_phases = [
      '    // Descriptor queue acquired, image descriptors pushed, uploads barriered.\n'
      '    ::Eden::Performance::Mark(::Eden::Performance::cfg_desc, since);\n'
      '    texture_cache.UpdateRenderTargets(false);'),
-    ('    if (IsBuilt() && !pipeline) {',
+    ('    if (IsBuilt() && (!pipeline || build->Failed())) {',
      '    // Render targets current, feedback loops checked.\n'
      '    ::Eden::Performance::Mark(::Eden::Performance::cfg_rt, since);\n'
-     '    if (IsBuilt() && !pipeline) {'),
+     '    if (IsBuilt() && (!pipeline || build->Failed())) {'),
     ('    return ConfigureDraw(rescaling, render_area);',
      '    // Compare the descriptor payload against last draw\'s and record the bindings.\n'
      '    const bool configured = ConfigureDraw(rescaling, render_area);\n'
@@ -1206,9 +1215,16 @@ configure_phases = [
 for name in ('vk_graphics_pipeline', 'vk_compute_pipeline'):
     anchors = [
         ('#include <algorithm>', '#include <algorithm>\n#include "performance.h"'),
-        ('            std::unique_lock lock{build_mutex};',
-         '            auto timer = Eden::Performance::VulkanTimer(16);\n            std::unique_lock lock{build_mutex};'),
     ]
+    # The wait for a pipeline still being built (Lichii's graphics pipelines wait in build->Wait).
+    if name == 'vk_graphics_pipeline':
+        anchors.append(('            build->Wait(!worker_only_build);',
+                        '            auto timer = Eden::Performance::VulkanTimer(16);\n'
+                        '            build->Wait(!worker_only_build);'))
+    else:
+        anchors.append(('            std::unique_lock lock{build_mutex};',
+                        '            auto timer = Eden::Performance::VulkanTimer(16);\n'
+                        '            std::unique_lock lock{build_mutex};'))
     if name == 'vk_graphics_pipeline':
         anchors += configure_phases
     adapt(f'src/video_core/renderer_vulkan/{name}.cpp', name + '_cost.cpp', anchors)
@@ -1468,7 +1484,9 @@ probes = {
     ],
 }
 for name, index, expected in (
-    ('vk_fence_manager', 6, 1), ('vk_buffer_cache', 7, 3),
+    # vk_buffer_cache: Lichii build 83+ added BufferCacheRuntime::Wait's submitted-tick wait and
+    # FinishForHostRead.
+    ('vk_fence_manager', 6, 1), ('vk_buffer_cache', 7, 5),
     # vk_texture_cache: the second is Eglantine patch 0006's wait between ASTC pieces, the third
     # patch 0010's wait for decode images past EDEN_NX2_TRANSCODE_INFLIGHT_MIB, the fourth patch
     # 0021's wait between groups of terrain layers encoded to BC.
