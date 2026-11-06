@@ -291,6 +291,21 @@ def main():
           f'memory pressure events {pressure}; images over the budget {over_budget}')
     print(f'  pipelines built on the GPU thread: {len(builds)}, {sum(builds):.0f} ms in all, '
           f'longest {max(builds) if builds else 0:.0f} ms')
+    kept = sum(int(m.group(1)) for l in eden
+               for m in [re.search(r'(\d+) passes kept recent ones', l)] if m)
+    if any('passes kept recent ones' in l for l in eden):
+        print(f'  collector passes that kept images used in the last texturas_recientes ms: {kept}')
+    # Terrain arrays (Eglantine patch 0021): the shape kept on the host and the BC uploads.
+    for line in dict.fromkeys(m.group(0) for l in eden
+                              for m in [re.search(r'\d+x\d+x\d+ ASTC image would be .*', l)] if m):
+        print(f'  terrain: {line}')
+    huge = [m for l in eden for m in [re.search(r'Huge ASTC arrays as (BC\d): (\d+) uploads, (\d+) layers', l)] if m]
+    if huge:
+        print(f'  terrain uploads as {huge[0].group(1)}: {sum(int(m.group(2)) for m in huge)} uploads, '
+              f'{sum(int(m.group(3)) for m in huge)} layers')
+    if builds and sum(builds) > 1000 and not any('async shaders on' in l for l in stderr if 'launch: Performance' in l):
+        verdict.append(f'Pipelines: {sum(builds):.0f} ms of stops building them on the GPU thread: '
+                       'try async_shaders=on.')
     if costly > 1000:
         verdict.append(f'Texture cache: {costly} costly images deleted and made again: it evicts what the '
                        'game uses (thresholds too low for its working set).')

@@ -333,6 +333,15 @@ inline bool ApplyEarly(const std::string& entry, bool& block_list_set) {
     else if (entry == "atajos_bufer=off") SetVariable("EDEN_NX2_DRAW_TUNING", "0");
     // gpu_dos_hilos=off: the GPU thread stays one thread even with gpu_accuracy=low (EDEN_NX2_SPLIT=0).
     else if (entry == "gpu_dos_hilos=off") SetVariable("EDEN_NX2_SPLIT", "0");
+    // terrenos_bc=off|bc1: the huge ASTC arrays (title 1's 8192x8192x68 terrain) stay RGBA8 on the host as
+    // before, or all go to BC1; BC3 without the line (BC1 for opaque ones). Eglantine patch 0021. Read once.
+    else if (entry == "terrenos_bc=off") SetVariable("EDEN_NX2_HUGE_ASTC_BC", "0");
+    else if (entry == "terrenos_bc=bc1") SetVariable("EDEN_NX2_HUGE_ASTC_BC", "bc1");
+    // texturas_recientes=N: the texture cache keeps images used in the last N ms (0 to 10000; 2000 without
+    // the line, 0: by frames only, as before) unless device memory is 512 MiB past its critical
+    // threshold. Eglantine patch 0022. Read once.
+    else if (entry.starts_with("texturas_recientes=") && Number(entry, 19, n) && n <= 10000)
+        SetVariable("EDEN_NX2_TC_KEEP_MS", entry.c_str() + 19);
     // bufer_max=N: the largest buffer the buffer cache makes by joining overlapping ones (MiB, 0 to
     // 4096; 256 without the line, 0: no limit, as before). Eglantine patch 0015; read once per app start.
     else if (entry.starts_with("bufer_max=") && Number(entry, 10, n) && n <= 4096)

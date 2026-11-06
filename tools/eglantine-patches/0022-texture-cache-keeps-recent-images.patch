@@ -1,0 +1,98 @@
+diff --git a/src/video_core/texture_cache/texture_cache.h b/src/video_core/texture_cache/texture_cache.h
+index 48fc3a8..7c9c4a4 100644
+--- a/src/video_core/texture_cache/texture_cache.h
++++ b/src/video_core/texture_cache/texture_cache.h
+@@ -148,6 +148,33 @@ void TextureCache<P>::RunGarbageCollector() {
+             return value != nullptr ? std::strtoull(value, nullptr, 10) : 0ULL;
+         }();
+         ticks_to_destroy = (std::max)(ticks_to_destroy, min_age);
++        // The ages above are frames: at title 1's 10-15 frames a second in a race, 10 frames is
++        // under a second, and the collector deleted the textures of what had just left the
++        // screen (79249 images made and 78310 deleted in 12 minutes, 53003 of them costly ASTC
++        // to decode again, with flashes as they came back). Images used in the last
++        // EDEN_NX2_TC_KEEP_MS (default 2000; 0: off) stay, unless device memory is past the
++        // critical threshold by EDEN_NX2_TC_KEEP_SLACK_MIB (default 512) or more.
++        static const auto keep_time = std::chrono::milliseconds([] {
++            const char* value = std::getenv("EDEN_NX2_TC_KEEP_MS");
++            return static_cast<long long>(value != nullptr ? std::strtoull(value, nullptr, 10)
++                                                           : 2000ULL);
++        }());
++        static const u64 keep_slack = [] {
++            const char* value = std::getenv("EDEN_NX2_TC_KEEP_SLACK_MIB");
++            return (value != nullptr ? std::strtoull(value, nullptr, 10) : 512ULL) << 20;
++        }();
++        if (keep_time.count() != 0 && total_used_memory < critical_memory + keep_slack) {
++            const auto since = std::chrono::steady_clock::now() - keep_time;
++            u64 recent = 0;
++            while (recent < frame_tick && recent < frame_starts.size() &&
++                   frame_starts[(frame_tick - 1 - recent) % frame_starts.size()] >= since) {
++                ++recent;
++            }
++            if (recent > ticks_to_destroy) {
++                ticks_to_destroy = recent;
++                ++gc_kept_recent;
++            }
++        }
+         num_iterations = aggressive_mode ? 40 : (high_priority_mode ? 20 : 10);
+     };
+     const auto Cleanup = [this, &num_iterations, &high_priority_mode, &aggressive_mode,
+@@ -446,9 +473,9 @@ void TextureCache<P>::TickFrame() {
+         if constexpr (requires { runtime.LogMemoryStatistics(); }) {
+             runtime.LogMemoryStatistics();
+         }
+-        LOG_INFO(HW_GPU, "Texture cache last 600 frames: created {} images, deleted {} (collector {}, {} costly, {} downloaded), {} async decodes, ASTC {} opaque / {} alpha",
++        LOG_INFO(HW_GPU, "Texture cache last 600 frames: created {} images, deleted {} (collector {}, {} costly, {} downloaded, {} passes kept recent ones), {} async decodes, ASTC {} opaque / {} alpha",
+                  images_created, images_deleted, gc_deletes + gc_costly_deletes, gc_costly_deletes,
+-                 gc_download_deletes,
++                 gc_download_deletes, gc_kept_recent,
+                  async_decodes_queued, astc_opaque_images, astc_alpha_images);
+         LOG_INFO(HW_GPU, "Texture cache last 600 frames: {} uploads from guest memory, {} MiB (largest {} MiB, {} by layer)",
+                  images_uploaded, uploaded_bytes >> 20, largest_upload >> 20, layer_uploads);
+@@ -468,6 +495,7 @@ void TextureCache<P>::TickFrame() {
+         // The per-image and per-shape tallies only feed debug lines: skip them while those are off.
+         debug_stats = Common::Log::IsLevelEnabled(Common::Log::Class::HW_GPU, Common::Log::Level::Debug);
+         gc_deletes = gc_costly_deletes = gc_download_deletes = async_decodes_queued = 0;
++        gc_kept_recent = 0;
+         images_created = images_deleted = 0;
+     }
+     if (total_used_memory > minimum_memory) {
+@@ -488,6 +516,7 @@ void TextureCache<P>::TickFrame() {
+     }
+ 
+     runtime.TickFrame();
++    frame_starts[frame_tick % frame_starts.size()] = std::chrono::steady_clock::now();
+     ++frame_tick;
+ 
+     if constexpr (IMPLEMENTS_ASYNC_DOWNLOADS) {
+diff --git a/src/video_core/texture_cache/texture_cache_base.h b/src/video_core/texture_cache/texture_cache_base.h
+index d8d9ec0..afdff36 100644
+--- a/src/video_core/texture_cache/texture_cache_base.h
++++ b/src/video_core/texture_cache/texture_cache_base.h
+@@ -6,7 +6,9 @@
+ 
+ #pragma once
+ 
++#include <array>
+ #include <atomic>
++#include <chrono>
+ #include <deque>
+ #include <limits>
+ #include <map>
+@@ -124,6 +126,7 @@ class TextureCache : public VideoCommon::ChannelSetupCaches<TextureCacheChannelI
+     // Periodic statistics (TickFrame).
+     u64 gc_deletes{};
+     u64 gc_costly_deletes{};
++    u64 gc_kept_recent{}; ///< Collector passes that kept images used in the last EDEN_NX2_TC_KEEP_MS
+     u64 gc_download_deletes{}; ///< Evictions that downloaded the image first (a full GPU wait)
+     u64 async_decodes_queued{};
+     u64 images_created{};
+@@ -625,6 +628,9 @@ private:
+ 
+     u64 modification_tick = 0;
+     u64 frame_tick = 0;
++    /// When each of the last 1024 frames started (by frame_tick % 1024): the collector keeps
++    /// images used in the last EDEN_NX2_TC_KEEP_MS whatever the frame rate.
++    std::array<std::chrono::steady_clock::time_point, 1024> frame_starts{};
+ 
+     Common::ThreadWorker texture_decode_worker{1, "TextureDecoder", {},
+                                                Common::ThreadPlacement::Efficiency};

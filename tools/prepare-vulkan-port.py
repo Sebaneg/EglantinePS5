@@ -1470,8 +1470,9 @@ probes = {
 for name, index, expected in (
     ('vk_fence_manager', 6, 1), ('vk_buffer_cache', 7, 3),
     # vk_texture_cache: the second is Eglantine patch 0006's wait between ASTC pieces, the third
-    # patch 0010's wait for decode images past EDEN_NX2_TRANSCODE_INFLIGHT_MIB.
-    ('vk_texture_cache', 8, 3), ('vk_swapchain', 9, 6),
+    # patch 0010's wait for decode images past EDEN_NX2_TRANSCODE_INFLIGHT_MIB, the fourth patch
+    # 0021's wait between groups of terrain layers encoded to BC.
+    ('vk_texture_cache', 8, 4), ('vk_swapchain', 9, 6),
     ('vk_descriptor_buffer', 10, 2), ('vk_multi_range_buffer', 11, 1),
     ('vk_compute_pass', 12, 1),
 ):

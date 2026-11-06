@@ -1,0 +1,435 @@
+diff --git a/src/video_core/renderer_vulkan/vk_texture_cache.cpp b/src/video_core/renderer_vulkan/vk_texture_cache.cpp
+index 4a33867..9fe3b4e 100644
+--- a/src/video_core/renderer_vulkan/vk_texture_cache.cpp
++++ b/src/video_core/renderer_vulkan/vk_texture_cache.cpp
+@@ -299,17 +299,84 @@ enum class SparseTilesMode {
+                                                            : (VkDeviceSize{768} << 20);
+ }
+ 
+-// The host format of a huge ASTC array: the GPU decoder's RGBA8 (sRGB kept for sampling).
++// How huge ASTC arrays are kept on the host. RGBA8 (4 bytes a texel) kept title 1's terrain at
++// 512x512 a layer under 256 MiB; BC3 (1 byte) keeps two levels more in the same memory, BC1
++// (half a byte) one more again. EDEN_NX2_HUGE_ASTC_BC=0 keeps RGBA8; =bc1 takes BC1 for all of
++// them; otherwise BC3, BC1 for opaque ASTC (ImageInfo::astc_opaque). Needs the GPU BC encoder
++// (astc_recompression other than Uncompressed) and sampled BC support.
++enum class HugeAstcMode { Rgba8, Bc3, Bc1 };
++
++[[nodiscard]] HugeAstcMode HugeAstcModeOf(const Device& device, const ImageInfo& info) {
++    static const char choice = [] {
++        const char* value = std::getenv("EDEN_NX2_HUGE_ASTC_BC");
++        if (value == nullptr || value[0] == '\0') {
++            return '1';
++        }
++        return value[0] == 'b' || value[0] == 'B' ? 'b' : value[0];
++    }();
++    if (choice == '0' || !IsHugeAstcArray(device, info) || !device.IsOptimalBcnSupported() ||
++        Settings::GetAstcRecompression() == Settings::AstcRecompression::Uncompressed) {
++        return HugeAstcMode::Rgba8;
++    }
++    return choice == 'b' || info.astc_opaque ? HugeAstcMode::Bc1 : HugeAstcMode::Bc3;
++}
++
++[[nodiscard]] bool HugeAstcAsBc(const Device& device, const ImageInfo& info) {
++    return HugeAstcModeOf(device, info) != HugeAstcMode::Rgba8;
++}
++
++// The host format of a huge ASTC array, or of a view of one (sRGB kept for sampling).
++[[nodiscard]] VkFormat HugeAstcVkFormat(const Device& device, const ImageInfo& info, bool srgb) {
++    switch (HugeAstcModeOf(device, info)) {
++    case HugeAstcMode::Bc3:
++        return srgb ? VK_FORMAT_BC3_SRGB_BLOCK : VK_FORMAT_BC3_UNORM_BLOCK;
++    case HugeAstcMode::Bc1:
++        return srgb ? VK_FORMAT_BC1_RGBA_SRGB_BLOCK : VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
++    default:
++        return srgb ? VK_FORMAT_A8B8G8R8_SRGB_PACK32 : VK_FORMAT_A8B8G8R8_UNORM_PACK32;
++    }
++}
++
+ [[nodiscard]] std::optional<VkFormat> HugeAstcHostFormat(const Device& device, const ImageInfo& info) {
+     if (!IsHugeAstcArray(device, info)) {
+         return std::nullopt;
+     }
+-    return VideoCore::Surface::IsPixelFormatSRGB(info.format) ? VK_FORMAT_A8B8G8R8_SRGB_PACK32
+-                                                              : VK_FORMAT_A8B8G8R8_UNORM_PACK32;
++    return HugeAstcVkFormat(device, info, VideoCore::Surface::IsPixelFormatSRGB(info.format));
+ }
+ 
+ constexpr std::array<VkFormat, 2> HugeAstcViewFormats{VK_FORMAT_A8B8G8R8_UNORM_PACK32,
+                                                        VK_FORMAT_A8B8G8R8_SRGB_PACK32};
++constexpr std::array<VkFormat, 2> HugeAstcBc3ViewFormats{VK_FORMAT_BC3_UNORM_BLOCK,
++                                                         VK_FORMAT_BC3_SRGB_BLOCK};
++constexpr std::array<VkFormat, 2> HugeAstcBc1ViewFormats{VK_FORMAT_BC1_RGBA_UNORM_BLOCK,
++                                                         VK_FORMAT_BC1_RGBA_SRGB_BLOCK};
++
++[[nodiscard]] std::span<const VkFormat> HugeAstcViews(const Device& device, const ImageInfo& info) {
++    switch (HugeAstcModeOf(device, info)) {
++    case HugeAstcMode::Bc3:
++        return HugeAstcBc3ViewFormats;
++    case HugeAstcMode::Bc1:
++        return HugeAstcBc1ViewFormats;
++    default:
++        return HugeAstcViewFormats;
++    }
++}
++
++// Bytes a texel block of the host copy of a huge ASTC array takes, and its side in texels.
++[[nodiscard]] u64 HugeAstcBlockBytes(const Device& device, const ImageInfo& info) {
++    switch (HugeAstcModeOf(device, info)) {
++    case HugeAstcMode::Bc3:
++        return 16;
++    case HugeAstcMode::Bc1:
++        return 8;
++    default:
++        return 4;
++    }
++}
++
++[[nodiscard]] u32 HugeAstcBlockSide(const Device& device, const ImageInfo& info) {
++    return HugeAstcAsBc(device, info) ? 4 : 1;
++}
+ 
+ // Opaque ASTC (ImageInfo::astc_opaque) re-compressed to BC1 instead of BC3.
+ [[nodiscard]] bool IsOpaqueBc1Astc(const Device& device, const ImageInfo& info) {
+@@ -375,11 +442,15 @@ constexpr std::array<VkFormat, 2> OpaqueAstcViewFormats{VK_FORMAT_BC1_RGBA_UNORM
+     if (!WillUseAcceleratedAstcDecode(device, info) || info.type != ImageType::e2D) {
+         return info;
+     }
++    // In the host format: RGBA8, or BC3/BC1 blocks for huge arrays kept as BC (HugeAstcAsBc).
++    const u32 side = HugeAstcBlockSide(device, info);
++    const u64 block_bytes = HugeAstcBlockBytes(device, info);
+     const auto decoded_bytes = [&](u32 skip) {
+         u64 bytes = 0;
+         for (s32 level = static_cast<s32>(skip); level < info.resources.levels; ++level) {
+-            bytes += u64{(std::max)(info.size.width >> level, 1U)} *
+-                     (std::max)(info.size.height >> level, 1U) * 4;
++            bytes += u64{Common::DivCeil((std::max)(info.size.width >> level, 1U), side)} *
++                     Common::DivCeil((std::max)(info.size.height >> level, 1U), side) *
++                     block_bytes;
+         }
+         return bytes * info.resources.layers;
+     };
+@@ -395,9 +466,12 @@ constexpr std::array<VkFormat, 2> OpaqueAstcViewFormats{VK_FORMAT_BC1_RGBA_UNORM
+     host.size.width = (std::max)(info.size.width >> level_offset, 1U);
+     host.size.height = (std::max)(info.size.height >> level_offset, 1U);
+     host.resources.levels -= static_cast<s32>(level_offset);
+-    LOG_WARNING(Render_Vulkan, "{}x{}x{} ASTC image would be {} MiB decoded; keeping mip levels {}+ ({}x{})",
++    static constexpr std::array<const char*, 3> mode_names{"RGBA8", "BC3", "BC1"};
++    LOG_WARNING(Render_Vulkan,
++                "{}x{}x{} ASTC image would be {} MiB as {}; keeping mip levels {}+ ({}x{}, {} MiB)",
+                 info.size.width, info.size.height, info.resources.layers, decoded_bytes(0) >> 20,
+-                level_offset, host.size.width, host.size.height);
++                mode_names[static_cast<size_t>(HugeAstcModeOf(device, info))], level_offset,
++                host.size.width, host.size.height, decoded_bytes(level_offset) >> 20);
+     return host;
+ }
+ 
+@@ -413,7 +487,20 @@ constexpr std::array<VkFormat, 2> OpaqueAstcViewFormats{VK_FORMAT_BC1_RGBA_UNORM
+     if (format_override) {
+         format_info.format = *format_override;
+         format_info.attachable = false;
+-        format_info.storage = true;
++        // ASTC kept as BC1/BC3 gets its blocks by buffer copies (TranscodeAstcToBcn,
++        // TranscodeHugeAstcLayers): BC is no storage format, and sparse BC images with storage
++        // usage may be refused.
++        switch (*format_override) {
++        case VK_FORMAT_BC1_RGBA_UNORM_BLOCK:
++        case VK_FORMAT_BC1_RGBA_SRGB_BLOCK:
++        case VK_FORMAT_BC3_UNORM_BLOCK:
++        case VK_FORMAT_BC3_SRGB_BLOCK:
++            format_info.storage = false;
++            break;
++        default:
++            format_info.storage = true;
++            break;
++        }
+     }
+     VkImageCreateFlags flags{};
+     if (IsCubeCompatible(device, info)) {
+@@ -2886,7 +2973,7 @@ Image::Image(TextureCacheRuntime& runtime_, const ImageInfo& info_, GPUVAddr gpu
+       original_image(MakeImage(runtime_.device, runtime_.memory_allocator,
+                                TrimmedHostInfo(runtime_.device, info, host_level_offset),
+                                IsHugeAstcArray(runtime_.device, info)
+-                                   ? std::span<const VkFormat>{HugeAstcViewFormats}
++                                   ? HugeAstcViews(runtime_.device, info)
+                                : IsOpaqueBc1Astc(runtime_.device, info)
+                                    ? std::span<const VkFormat>{OpaqueAstcViewFormats}
+                                    : runtime->ViewFormats(info.format),
+@@ -2946,7 +3033,9 @@ Image::Image(TextureCacheRuntime& runtime_, const ImageInfo& info_, GPUVAddr gpu
+     current_image = &Image::original_image;
+     const s32 host_levels = info.resources.levels - static_cast<s32>(host_level_offset);
+     storage_image_views.resize(host_levels);
+-    if (WillUseAcceleratedAstcDecode(runtime->device, info)) {
++    // Huge arrays kept as BC get no RGBA8 views: they are written by copies.
++    if (WillUseAcceleratedAstcDecode(runtime->device, info) &&
++        !HugeAstcAsBc(runtime->device, info)) {
+         const auto& device = runtime->device.GetLogical();
+         const VkFormat storage_format = VK_FORMAT_A8B8G8R8_UNORM_PACK32;
+         for (s32 level = 0; level < host_levels; ++level) {
+@@ -3402,10 +3491,14 @@ bool Image::InitSparseLayers() {
+     s.height = host.size.height;
+     s.levels = static_cast<u32>(host.resources.levels);
+     // Sparse block size in texels (drivers give it in texels or in compressed blocks).
++    // Huge ASTC arrays: in their host format (RGBA8 texels, or BC3/BC1 4x4 blocks).
+     const bool huge_astc = IsHugeAstcArray(device, info);
+-    const u32 block_width = huge_astc ? 1 : VideoCore::Surface::DefaultBlockWidth(info.format);
+-    const u32 block_height = huge_astc ? 1 : VideoCore::Surface::DefaultBlockHeight(info.format);
+-    const u64 block_bytes = huge_astc ? 4 : VideoCore::Surface::BytesPerBlock(info.format);
++    const u32 block_width = huge_astc ? HugeAstcBlockSide(device, info)
++                                      : VideoCore::Surface::DefaultBlockWidth(info.format);
++    const u32 block_height = huge_astc ? HugeAstcBlockSide(device, info)
++                                       : VideoCore::Surface::DefaultBlockHeight(info.format);
++    const u64 block_bytes = huge_astc ? HugeAstcBlockBytes(device, info)
++                                      : VideoCore::Surface::BytesPerBlock(info.format);
+     VkExtent3D granularity = it->formatProperties.imageGranularity;
+     if (granularity.width == 0 || granularity.height == 0) {
+         // Seen with AMD's driver: the sparse block size comes back as 0, and the size computation
+@@ -4187,9 +4280,8 @@ ImageView::ImageView(TextureCacheRuntime& runtime, const VideoCommon::ImageViewI
+     }
+     auto format_info = MaxwellToVK::SurfaceFormat(*device, FormatType::Optimal, true, format);
+     if (IsHugeAstcArray(*device, image.info)) {
+-        format_info.format = VideoCore::Surface::IsPixelFormatSRGB(format)
+-                                 ? VK_FORMAT_A8B8G8R8_SRGB_PACK32
+-                                 : VK_FORMAT_A8B8G8R8_UNORM_PACK32;
++        format_info.format =
++            HugeAstcVkFormat(*device, image.info, VideoCore::Surface::IsPixelFormatSRGB(format));
+     } else if (IsOpaqueBc1Astc(*device, image.info) && IsPixelFormatASTC(format)) {
+         format_info.format = VideoCore::Surface::IsPixelFormatSRGB(format)
+                                  ? VK_FORMAT_BC1_RGBA_SRGB_BLOCK
+@@ -4885,6 +4977,11 @@ void TextureCacheRuntime::AccelerateImageUpload(
+     u32 z_start, u32 z_count) {
+ 
+     if (IsPixelFormatASTC(image.info.format)) {
++        if (bc_encoder_pass && HugeAstcAsBc(device, image.info)) {
++            std::vector<u32> layers(static_cast<size_t>(image.info.resources.layers));
++            std::iota(layers.begin(), layers.end(), 0U);
++            return TranscodeHugeAstcLayers(image, map, swizzles, layers);
++        }
+         if (bc_encoder_pass && WillUseGpuBcnTranscode(device, image.info)) {
+             return TranscodeAstcToBcn(image, map, swizzles);
+         }
+@@ -4909,19 +5006,15 @@ void TextureCacheRuntime::AccelerateImageUpload(
+ void TextureCacheRuntime::AccelerateImageUploadLayers(
+     Image& image, const StagingBufferRef& map,
+     std::span<const VideoCommon::SwizzleParameters> swizzles, std::span<const u32> layers) {
++    if (bc_encoder_pass && HugeAstcAsBc(device, image.info)) {
++        return TranscodeHugeAstcLayers(image, map, swizzles, layers);
++    }
+     astc_decoder_pass->AssembleLayers(image, map, swizzles, layers);
+ }
+ 
+-void TextureCacheRuntime::TranscodeAstcToBcn(
+-    Image& image, const StagingBufferRef& map,
+-    std::span<const VideoCommon::SwizzleParameters> swizzles) {
+-    const ImageInfo& info = image.info;
+-    const u32 width = info.size.width;
+-    const u32 height = info.size.height;
+-    const u32 levels = static_cast<u32>(info.resources.levels);
+-    const u32 layers = static_cast<u32>(info.resources.layers);
+-    // The BC encoder declares layout(rgba8). Identical byte layout is not enough:
+-    // its storage image view must have the matching R8G8B8A8_UNORM format.
++TextureCacheRuntime::PendingTranscode TextureCacheRuntime::AcquireTranscodeImage(u32 width, u32 height,
++                                                                                u32 levels,
++                                                                                u32 layers) {
+     constexpr VkFormat DecodeFormat = VK_FORMAT_R8G8B8A8_UNORM;
+     // A decode image of the same shape the GPU is done with: title 1's title screen decodes
+     // dozens of textures a frame, mostly of a few shapes. Making one took 263 us; from VMA's
+@@ -5013,6 +5106,21 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
+                 MakeStorageView(device.GetLogical(), level, *pending.image, DecodeFormat));
+         }
+     }
++    return pending;
++}
++
++void TextureCacheRuntime::TranscodeAstcToBcn(
++    Image& image, const StagingBufferRef& map,
++    std::span<const VideoCommon::SwizzleParameters> swizzles) {
++    const ImageInfo& info = image.info;
++    const u32 width = info.size.width;
++    const u32 height = info.size.height;
++    const u32 levels = static_cast<u32>(info.resources.levels);
++    const u32 layers = static_cast<u32>(info.resources.layers);
++    // The BC encoder declares layout(rgba8). Identical byte layout is not enough:
++    // its storage image view must have the matching R8G8B8A8_UNORM format.
++    constexpr VkFormat DecodeFormat = VK_FORMAT_R8G8B8A8_UNORM;
++    PendingTranscode pending = AcquireTranscodeImage(width, height, levels, layers);
+     astc_decoder_pass->AssembleInto(
+         info, 0, image.guest_size_bytes,
+         ASTCDecoderPass::Target{
+@@ -5114,6 +5222,143 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
+     pending_transcodes.push_back(std::move(pending));
+ }
+ 
++void TextureCacheRuntime::TranscodeHugeAstcLayers(
++    Image& image, const StagingBufferRef& map,
++    std::span<const VideoCommon::SwizzleParameters> swizzles, std::span<const u32> layers) {
++    if (layers.empty()) {
++        return;
++    }
++    const ImageInfo& info = image.info;
++    const u32 skip = image.host_level_offset;
++    const u32 width = (std::max)(info.size.width >> skip, 1U);
++    const u32 height = (std::max)(info.size.height >> skip, 1U);
++    const u32 levels = static_cast<u32>(info.resources.levels) - skip;
++    const bool bc3 = HugeAstcModeOf(device, info) == HugeAstcMode::Bc3;
++    const u64 block_bytes = bc3 ? 16 : 8;
++    constexpr VkFormat DecodeFormat = VK_FORMAT_R8G8B8A8_UNORM;
++    // One layer's host mip chain, decoded (RGBA8) and encoded (BC).
++    u64 decoded_layer = 0;
++    u64 encoded_layer = 0;
++    for (u32 level = 0; level < levels; ++level) {
++        const u32 level_width = (std::max)(width >> level, 1U);
++        const u32 level_height = (std::max)(height >> level, 1U);
++        decoded_layer += u64{level_width} * level_height * 4;
++        encoded_layer +=
++            u64{Common::DivCeil(level_width, 4U)} * Common::DivCeil(level_height, 4U) * block_bytes;
++    }
++    // Layers go a group at a time through one decode image: the group's RGBA8 under
++    // EDEN_NX2_TRANSCODE_INFLIGHT_MIB (default 192) and its BC under EDEN_NX2_TRANSCODE_CHUNK_MIB
++    // (default 32), one layer at least. Title 1's terrain at 2048x2048 is 21 MiB a layer decoded
++    // and 5.3 MiB as BC3.
++    static const u64 decode_budget = [] {
++        const char* value = std::getenv("EDEN_NX2_TRANSCODE_INFLIGHT_MIB");
++        const u64 mib = value != nullptr ? std::strtoull(value, nullptr, 10) : 192ULL;
++        return (mib != 0 ? mib : 192ULL) << 20;
++    }();
++    static const u64 encode_budget = [] {
++        const char* value = std::getenv("EDEN_NX2_TRANSCODE_CHUNK_MIB");
++        const u64 mib = value != nullptr ? std::strtoull(value, nullptr, 10) : 32ULL;
++        return (mib != 0 ? mib : 32ULL) << 20;
++    }();
++    const u64 fit = (std::min)(decode_budget / decoded_layer, encode_budget / encoded_layer);
++    const u32 group = static_cast<u32>(std::clamp<u64>(fit, 1, layers.size()));
++    PendingTranscode pending = AcquireTranscodeImage(width, height, levels, group);
++    // A view per level and layer of the decode image: the decoder writes one layer at a time.
++    for (u32 level = 0; level < levels; ++level) {
++        for (u32 layer = 0; layer < group; ++layer) {
++            pending.chunk_views.push_back(MakeStorageView(device.GetLogical(), level, *pending.image,
++                                                          DecodeFormat, layer, 1));
++        }
++    }
++    std::vector<u32> local(group);
++    std::iota(local.begin(), local.end(), 0U);
++    // The input holds each layer's mip chain from host level 0 on, layer after layer (as
++    // ASTCDecoderPass::AssembleInto reads it).
++    const u64 input_layer_stride =
++        skip != 0 ? info.layer_stride -
++                        static_cast<u64>(VideoCommon::FullUploadSwizzles(info)[skip].buffer_offset)
++                  : info.layer_stride;
++    const auto encoded_barrier = [](vk::CommandBuffer cmdbuf) {
++        const VkMemoryBarrier barrier{
++            .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
++            .pNext = nullptr,
++            .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
++            .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
++        };
++        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
++                               0, barrier);
++    };
++    for (size_t first = 0; first < layers.size(); first += group) {
++        const u32 count = static_cast<u32>((std::min<size_t>)(group, layers.size() - first));
++        if (first != 0) {
++            // The decode image and the last group's output are used again: wait for the GPU.
++            scheduler.Finish();
++        }
++        StagingBufferRef part = map;
++        part.offset += first * input_layer_stride;
++        astc_decoder_pass->AssembleInto(
++            info, skip, image.guest_size_bytes,
++            ASTCDecoderPass::Target{
++                .image = *pending.image,
++                .aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT,
++                .initialized = false,
++                .level_view = [&pending](s32 level) { return *pending.views[level]; },
++                .wait = false,
++                .layers = std::span<const u32>{local}.first(count),
++                .layer_view = [&pending, group](s32 level, u32 layer) {
++                    return *pending.chunk_views[static_cast<size_t>(level) * group + layer];
++                },
++            },
++            part, swizzles);
++        const u64 total = encoded_layer * count;
++        const auto output = staging_buffer_pool.Request(total, MemoryUsage::DeviceLocal);
++        boost::container::small_vector<VideoCommon::BufferImageCopy, 64> copies;
++        u64 level_offset = 0;
++        for (u32 level = 0; level < levels; ++level) {
++            const u32 level_width = (std::max)(width >> level, 1U);
++            const u32 level_height = (std::max)(height >> level, 1U);
++            const u32 blocks_x = Common::DivCeil(level_width, 4U);
++            const u32 blocks_y = Common::DivCeil(level_height, 4U);
++            const u64 layer_size = u64{blocks_x} * blocks_y * block_bytes;
++            bc_encoder_pass->Encode(*pending.views[level], level_width, level_height, count, bc3,
++                                    output.buffer, output.offset, total, level_offset);
++            // The encoder writes the group's layers one after another; each goes to its layer.
++            for (u32 i = 0; i < count; ++i) {
++                copies.push_back({
++                    .buffer_offset = level_offset + u64{i} * layer_size,
++                    .buffer_size = layer_size,
++                    .buffer_row_length = blocks_x * 4,
++                    .buffer_image_height = blocks_y * 4,
++                    .image_subresource{
++                        .base_level = static_cast<s32>(level),
++                        .base_layer = static_cast<s32>(layers[first + i]),
++                        .num_layers = 1,
++                    },
++                    .image_offset{0, 0, 0},
++                    .image_extent{level_width, level_height, 1},
++                });
++            }
++            level_offset += layer_size * count;
++        }
++        scheduler.Record(encoded_barrier);
++        image.UploadMemory(output.buffer, output.offset, copies);
++    }
++    ++huge_bc_uploads;
++    huge_bc_layers += layers.size();
++    const auto now = std::chrono::steady_clock::now();
++    if (now - huge_bc_window >= std::chrono::seconds{5}) {
++        LOG_INFO(Render_Vulkan,
++                 "Huge ASTC arrays as {}: {} uploads, {} layers in 5 s ({}x{}, {} levels, "
++                 "{} layers a group)",
++                 bc3 ? "BC3" : "BC1", huge_bc_uploads, huge_bc_layers, width, height, levels, group);
++        huge_bc_uploads = 0;
++        huge_bc_layers = 0;
++        huge_bc_window = now;
++    }
++    pending.tick = scheduler.CurrentTick();
++    pending_transcodes.push_back(std::move(pending));
++}
++
+ void TextureCacheRuntime::TransitionImageLayout(Image& image) {
+     if (!image.ExchangeInitialization()) {
+         VkImageMemoryBarrier barrier{
+diff --git a/src/video_core/renderer_vulkan/vk_texture_cache.h b/src/video_core/renderer_vulkan/vk_texture_cache.h
+index 5edb424..f986d16 100644
+--- a/src/video_core/renderer_vulkan/vk_texture_cache.h
++++ b/src/video_core/renderer_vulkan/vk_texture_cache.h
+@@ -287,6 +287,18 @@ public:
+     void TranscodeAstcToBcn(Image& image, const StagingBufferRef& map,
+                             std::span<const VideoCommon::SwizzleParameters> swizzles);
+ 
++    /// Huge ASTC arrays kept as BC3/BC1 (HugeAstcAsBc): `layers` of `map` (each layer's mip chain
++    /// from the first level the host keeps, in order) decoded a group at a time into a temporary
++    /// RGBA8 array, encoded, and copied into those layers.
++    void TranscodeHugeAstcLayers(Image& image, const StagingBufferRef& map,
++                                 std::span<const VideoCommon::SwizzleParameters> swizzles,
++                                 std::span<const u32> layers);
++
++    struct PendingTranscode;
++    /// A temporary RGBA8 decode image of this shape: one the GPU is done with, or a new one once
++    /// the images in flight fit under EDEN_NX2_TRANSCODE_INFLIGHT_MIB.
++    PendingTranscode AcquireTranscodeImage(u32 width, u32 height, u32 levels, u32 layers);
++
+     /// Temporary decode images, reusable once the GPU is past `tick`.
+     struct PendingTranscode {
+         u64 tick;
+@@ -304,6 +316,10 @@ public:
+     std::vector<PendingTranscode> free_transcodes;
+     /// Times a transcode waited for the GPU to free decode images (EDEN_NX2_TRANSCODE_INFLIGHT_MIB).
+     u64 transcode_waits{};
++    /// TranscodeHugeAstcLayers calls and layers in the current 5 s window (logged per window).
++    u64 huge_bc_uploads{};
++    u64 huge_bc_layers{};
++    std::chrono::steady_clock::time_point huge_bc_window{};
+ 
+     std::optional<BlockLinearUnswizzle3DPass> bl3d_unswizzle_pass;
+     const Settings::ResolutionScalingInfo& resolution;
