@@ -36,6 +36,9 @@ int eden_game_language(const char* rom_path, const char* keys_dir, uint64_t titl
 // Update and DLC files (NSP or XCI, any depth) in updates_dir, read with the provider that also
 // applies them to a running game. Replaces the previous scan; eden_game_addons queries it.
 void eden_scan_addons(const char* updates_dir, const char* keys_dir);
+// A NUP file holds its update and DLC itself: adds them to the last eden_scan_addons, so that
+// eden_game_addons reports them too. Any other file is left alone.
+void eden_note_nup_addons(const char* rom_path);
 // The update and DLC files of a game in updates_dir (NSP or XCI, any depth), by the title IDs
 // they hold: each one's full path is handed to found. Returns how many there were.
 typedef void (*eden_found_file)(void* user, const char* path);
@@ -66,6 +69,24 @@ int eden_save_import(uint64_t title_id, char* path, size_t capacity);
 // Copies the game's saves to save-export/<title ID>-<date>-<time>/ (account/ and device/) in the
 // game files folder; path receives that folder.
 int eden_save_export(uint64_t title_id, char* path, size_t capacity);
+
+// Packing a folder game (exefs/ and romfs/, with its updates and DLC) into one NUP file, as the
+// core's packer does (core/file_sys/nup_writer.h). The folder is given by the game's exefs/main.
+// Nonzero, with the folder in dump_root, when exefs/main belongs to a folder that can be packed.
+int eden_nup_source(const char* rom_path, char* dump_root, size_t capacity);
+// Where the package goes: next to the folder, with ".nup" added to its name.
+int eden_nup_archive_path(const char* dump_root, char* archive, size_t capacity);
+typedef void (*eden_nup_progress)(void* user, uint64_t bytes_done, uint64_t bytes_total);
+enum {
+    EDEN_NUP_DONE = 0,
+    EDEN_NUP_CANCELLED = 1,   // cancel was set; no package is left
+    EDEN_NUP_INVALID = 2,     // not a folder game, or the package already exists
+    EDEN_NUP_FAILED = 3,      // reading or writing failed (error says why, when it can)
+};
+// Writes the package (as <archive>.part, then moved into place). cancel is a std::atomic_bool the
+// caller sets to stop it; progress is called from the packing thread. Takes minutes for a big game.
+int eden_nup_pack(const char* dump_root, const char* archive, eden_nup_progress progress, void* user,
+                  const void* cancel, char* error, size_t error_capacity);
 
 #ifdef __cplusplus
 }

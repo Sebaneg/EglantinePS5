@@ -541,9 +541,13 @@ void Flusher() {
 // Should it not take the signal (a wait the system does not interrupt), the watch writes the
 // report itself after 10 s, which at least says the game froze.
 void FreezeWatch() {
-    unsigned limit = 30;
-    if (const char* value = std::getenv("EDEN_FREEZE_SECONDS")) limit = static_cast<unsigned>(std::strtoul(value, nullptr, 10));
-    if (limit == 0) return;
+    // EDEN_FREEZE_SECONDS (0: off) is read again every second: the lab file sets it as the game
+    // starts, after this thread began (a frame capture can hold the GPU thread for minutes).
+    const auto Limit = [] {
+        const char* value = std::getenv("EDEN_FREEZE_SECONDS");
+        return value ? static_cast<unsigned>(std::strtoul(value, nullptr, 10)) : 30U;
+    };
+    unsigned limit = Limit();
     unsigned long long last = frames_shown.load(std::memory_order_relaxed);
     unsigned still = 0;
     bool armed = false;  // a frame was shown in this game
@@ -561,6 +565,11 @@ void FreezeWatch() {
             last = now;
             still = 0;
             armed = true;
+            continue;
+        }
+        limit = Limit();
+        if (limit == 0) {
+            still = 0;
             continue;
         }
         if (!armed || ++still < limit) continue;
