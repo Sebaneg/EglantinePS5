@@ -601,6 +601,34 @@ adapt('src/video_core/vulkan_common/vulkan_memory_allocator.cpp', 'vulkan_memory
         }
     }
 """),
+    # An ordinary image the pool has no room for became an image with nothing bound, and sampled it
+    # shows whatever is there: Mario Kart World's colored blocks on buildings and trees (326 such
+    # images in one race, 1024x1024 textures among them). Before that, as for a refused buffer: the
+    # guest's memory next to the graphics goes to the swap file, the heap gives back its empty
+    # pieces, then part of the guest's reserve goes back to the pool, and it is asked for again.
+    ('    if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY && ci.imageType != VK_IMAGE_TYPE_1D) {\n',
+     """    if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY && !huge) {
+        VmaAllocationCreateInfo again = alloc_ci;
+        again.flags &= ~static_cast<VmaAllocationCreateFlags>(VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT);
+        for (int attempt = 0; result == VK_ERROR_OUT_OF_DEVICE_MEMORY && attempt < 3; ++attempt) {
+            const std::size_t freed =
+                eden_guest_memory_emergency ? eden_guest_memory_emergency(std::size_t{64} << 20) : 0;
+            const std::size_t trimmed = ::Eden::Performance::TrimHeap("an image was refused");
+            const std::size_t lent = freed == 0 && trimmed == 0 ? eden_guest_memory_lend(std::size_t{64} << 20) : 0;
+            if (freed == 0 && trimmed == 0 && lent == 0) break;
+            result = vmaCreateImage(allocator, &ci, &again, &handle, &allocation, &alloc_info);
+            static std::atomic<unsigned long long> rescued{0};
+            const auto times = rescued.fetch_add(1, std::memory_order_relaxed) + 1;
+            if ((times & (times - 1)) == 0) { // the 1st, 2nd, 4th, 8th ... time
+                std::fprintf(stderr, "EDEN_IMAGE_EMERGENCY %llu: %ux%u, %u layers: %zu MiB to the swap file, %zu MiB "
+                             "of the heap, %zu MiB of the reserve; asked again: result %d\\n",
+                             times, ci.extent.width, ci.extent.height, ci.arrayLayers, freed >> 20, trimmed >> 20,
+                             lent >> 20, int(result));
+            }
+        }
+    }
+    if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY && ci.imageType != VK_IMAGE_TYPE_1D) {
+"""),
     ('    vk::Check(vmaCreateBuffer(allocator, &ci, &alloc_ci, &handle, &allocation, &alloc_info));\n',
      refused('vmaCreateBuffer(allocator, &ci, &alloc_ci, &handle, &allocation, &alloc_info)',
              'buffer of %llu bytes, usage 0x%x', BUFFER_VALUES)),
