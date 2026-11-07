@@ -863,6 +863,65 @@ extern "C" unsigned eden_guest_memory_wanted(void) noexcept {
     return memory_waiters.load(std::memory_order_acquire);
 }
 
+// From viejunerd/Eglantine-PS5- (01.219.020): blocks of the guest's reserve the host may take when
+// the pool has none. Half of the reserve (as the lab file sets it, reserva_juego=MiB) always stays
+// for the guest's writes, and nothing goes while writes wait for a block.
+std::atomic<std::uint64_t> host_reserve_used{0};
+
+// A block for the host (the JIT's code cache) after the direct pool refused even 2 MiB: its
+// ownership moves under the reserve lock, so the keeper cannot race for it.
+bool TakeHostReserveBlock(std::int64_t* physical) noexcept {
+#ifdef PS5_NATIVE
+    if (!physical) return false;
+    Spin(reserve_lock);
+    const auto count = reserve_count.load(std::memory_order_relaxed);
+    const bool allowed = service_range.load(std::memory_order_acquire) != nullptr &&
+        memory_waiters.load(std::memory_order_acquire) == 0 &&
+        count > reserve_target.load(std::memory_order_relaxed) / 2;
+    if (allowed) {
+        *physical = reserve[count - 1];
+        reserve_count.store(count - 1, std::memory_order_relaxed);
+    }
+    reserve_lock.clear(std::memory_order_release);
+    if (allowed) host_reserve_used.fetch_add(1, std::memory_order_relaxed);
+    return allowed;
+#else
+    (void)physical;
+    return false;
+#endif
+}
+
+// Last resort for the graphics driver, after the pool refused an allocation inside and outside the
+// budget: up to `bytes` of the reserve go back to the pool (in whole blocks) so it can be asked for
+// again, under the same rules. The keeper takes the memory again once the pool has room. Returns
+// the bytes given back.
+extern "C" std::size_t eden_guest_memory_lend(std::size_t bytes) noexcept {
+#ifdef PS5_NATIVE
+    if (service_range.load(std::memory_order_acquire) == nullptr) return 0;
+    std::size_t lent = 0;
+    while (lent < bytes) {
+        std::int64_t physical = -1;
+        Spin(reserve_lock);
+        const auto count = reserve_count.load(std::memory_order_relaxed);
+        const bool allowed = memory_waiters.load(std::memory_order_acquire) == 0 &&
+        count > reserve_target.load(std::memory_order_relaxed) / 2;
+        if (allowed) {
+            physical = reserve[count - 1];
+            reserve_count.store(count - 1, std::memory_order_relaxed);
+        }
+        reserve_lock.clear(std::memory_order_release);
+        if (!allowed) break;
+        if (sceKernelReleaseDirectMemory(physical, SparseSlot) != 0) std::abort();
+        lent += SparseSlot;
+    }
+    if (lent != 0) host_reserve_used.fetch_add(lent / SparseSlot, std::memory_order_relaxed);
+    return lent;
+#else
+    (void)bytes;
+    return 0;
+#endif
+}
+
 // The guest's headroom (the reserve): what it holds and what it is to hold, in bytes; both 0 while
 // the service does not run or keeps no reserve (the host). headless/performance.cpp counts what is
 // not held yet as taken, as all of it was before.

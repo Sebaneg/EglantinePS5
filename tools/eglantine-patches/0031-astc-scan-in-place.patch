@@ -1,0 +1,50 @@
+From 87da314115bd91b7950b8597f68af0098b8fefc9 Mon Sep 17 00:00:00 2001
+From: SmileyTatsu <185381457+SmileyTatsu@users.noreply.github.com>
+Date: Thu, 5 Nov 2026 18:57:53 -0600
+Subject: [PATCH] texture_cache: scan new ASTC data where it is instead of
+ copying it first
+
+The opacity scan copied the whole guest range into astc_scan_buffer and the
+upload then read it again. GpuGuestMemory hands out the guest memory directly
+when the range is in one piece and falls back to the scratch buffer when it is
+split, so the scan no longer copies in the common case.
+
+Assisted-by: Claude Sonnet 5.5 (implementation)
+---
+ src/video_core/texture_cache/texture_cache.h      | 9 ++++++---
+ src/video_core/texture_cache/texture_cache_base.h | 2 +-
+ 2 files changed, 7 insertions(+), 4 deletions(-)
+
+diff --git a/src/video_core/texture_cache/texture_cache.h b/src/video_core/texture_cache/texture_cache.h
+index 25a313dd22..a00cfc5a55 100644
+--- a/src/video_core/texture_cache/texture_cache.h
++++ b/src/video_core/texture_cache/texture_cache.h
+@@ -2582,9 +2582,12 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
+         if (IsPixelFormatASTC(new_info.format) && runtime.UseOpaqueAstcFormat()) {
+             const size_t scan_bytes = CalculateGuestSizeInBytes(new_info);
+             if (scan_bytes <= MaxScanBytes) {
+-                astc_scan_buffer.resize(scan_bytes);
+-                gpu_memory->ReadBlockUnsafe(gpu_addr, astc_scan_buffer.data(), scan_bytes);
+-                new_info.astc_opaque = AstcDataLooksOpaque(astc_scan_buffer);
++                // Scanned where it is when it is in one piece; only copied (into the scratch
++                // buffer) when the range is split.
++                Tegra::Memory::GpuGuestMemory<u8, Tegra::Memory::GuestMemoryFlags::UnsafeRead>
++                    scan_data(*gpu_memory, gpu_addr, scan_bytes, &astc_scan_buffer);
++                new_info.astc_opaque =
++                    AstcDataLooksOpaque(std::span<const u8>{scan_data.data(), scan_data.size()});
+                 ++(new_info.astc_opaque ? astc_opaque_images : astc_alpha_images);
+             }
+         }
+diff --git a/src/video_core/texture_cache/texture_cache_base.h b/src/video_core/texture_cache/texture_cache_base.h
+index 06fcc0de77..fe156b881e 100644
+--- a/src/video_core/texture_cache/texture_cache_base.h
++++ b/src/video_core/texture_cache/texture_cache_base.h
+@@ -141,7 +141,7 @@ class TextureCache : public VideoCommon::ChannelSetupCaches<TextureCacheChannelI
+     u64 slack_margin{};           ///< Extra room for allocator block space the driver counts as used
+     u64 astc_opaque_images{};
+     u64 astc_alpha_images{};
+-    std::vector<u8> astc_scan_buffer;
++    Common::ScratchBuffer<u8> astc_scan_buffer;
+     u64 images_deleted{};
+     std::map<u64, std::pair<u32, GPUVAddr>> created_shapes;
+     bool debug_stats{true}; ///< Collect what only the debug statistics lines use

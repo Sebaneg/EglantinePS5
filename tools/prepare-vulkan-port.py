@@ -63,9 +63,9 @@ constexpr VkPipelineStageFlags COMPUTE_CONSUMER_STAGES =
 
 void RasterizerVulkan::DispatchCompute() {"""),
     # Lichii (build 83+) traces the compute pipeline before it records the dispatch.
-    ('        scheduler.RequestOutsideRenderPassOperationContext();\n        scheduler.TraceComputePipeline(pipeline->ShaderHash());\n',
-     """        scheduler.RequestOutsideRenderPassOperationContext();
-        scheduler.TraceComputePipeline(pipeline->ShaderHash());
+    # Build 93 records a read barrier between the two, so anchor on the trace alone.
+    ('        scheduler.TraceComputePipeline(pipeline->ShaderHash());\n',
+     """        scheduler.TraceComputePipeline(pipeline->ShaderHash());
         if (::Eden::DevVulkan::compute_barriers) {
             scheduler.Record([](vk::CommandBuffer cmdbuf) {
                 cmdbuf.PipelineBarrier(vk::PIPELINE_STAGE_GRAPHICS_COMPUTE_TRANSFER,
@@ -528,6 +528,13 @@ ALLOCATOR_REFUSED = """    VkResult created = CALL;
                          static_cast<unsigned long long>(guest_held >> 20),
                          static_cast<unsigned long long>(eden_heap_committed() >> 20));
             ::Eden::Performance::ReportHeap("a buffer was refused");
+            // Last resort (from viejunerd/Eglantine-PS5-): part of the guest's reserve goes back to
+            // the pool (half of it stays for the game's writes) and the allocation is asked once more.
+            if (const std::size_t lent = eden_guest_memory_lend(std::size_t{128} << 20); lent != 0) {
+                created = AGAIN;
+                std::fprintf(stderr, "EDEN_GRAPHICS_MEMORY %zu MiB of the guest's reserve lent; asked again: result %d\\n",
+                             lent >> 20, int(created));
+            }
         }
     }
     vk::Check(created);
@@ -539,7 +546,7 @@ IMAGE_VALUES = 'ci.extent.width, ci.extent.height, ci.extent.depth, ci.arrayLaye
 BUFFER_VALUES = 'static_cast<unsigned long long>(ci.size), unsigned(ci.usage)'
 adapt('src/video_core/vulkan_common/vulkan_memory_allocator.cpp', 'vulkan_memory_allocator.cpp', [
     ('#include "video_core/vulkan_common/vulkan_memory_allocator.h"\n',
-     '#include "video_core/vulkan_common/vulkan_memory_allocator.h"\n#include <atomic>\n#include <cstddef>\n#include <cstdio>\n#include "capped_layers.h"\n#include "performance.h"\nnamespace Common { void GuestMemoryUsage(std::size_t* span, std::size_t* held) noexcept; }\nextern "C" std::size_t eden_heap_committed(void);\nextern "C" std::size_t eden_guest_memory_emergency(std::size_t wanted) noexcept __attribute__((weak));\n'),
+     '#include "video_core/vulkan_common/vulkan_memory_allocator.h"\n#include <atomic>\n#include <cstddef>\n#include <cstdio>\n#include "capped_layers.h"\n#include "performance.h"\nnamespace Common { void GuestMemoryUsage(std::size_t* span, std::size_t* held) noexcept; }\nextern "C" std::size_t eden_heap_committed(void);\nextern "C" std::size_t eden_guest_memory_emergency(std::size_t wanted) noexcept __attribute__((weak));\nextern "C" std::size_t eden_guest_memory_lend(std::size_t bytes) noexcept;\n'),
     # What an image was that the allocator could not make at all, for stderr.log.
     ('    if (result != VK_SUCCESS) {\n        LOG_CRITICAL(Render_Vulkan, "Image {}x{}x{} ({} levels, {} layers, format {}) failed: {}",',
      """    if (result != VK_SUCCESS) {
