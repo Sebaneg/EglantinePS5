@@ -100,6 +100,28 @@ radv_ps5_memory_grant_gpu(void *address, uint64_t bytes)
          (root/'tools/radv-mapping-report.inc').read_text()),
         ('   if (!placed) {', '   if (!placed) {\n      fprintf(stderr, "radv/ps5: mapping rejected result=%d address=%p bytes=%llu window32=%d\\n", result, address, (unsigned long long)bytes, window32);\n      radv_ps5_report_space();'),
     ],
+    # SPIR-V this Mesa cannot parse: spirv_to_nir returns NULL and the next line used it, so the app
+    # ended on address 0x40 (Ocarina of Time after 18 minutes, then at every boot once the pipeline
+    # was in its cache). An empty shader takes its place: that draw shows nothing, the game goes on.
+    'src/amd/vulkan/radv_shader.c': [
+        ('#include "nir/nir.h"\n', '#include <stdio.h>\n#include "nir/nir.h"\n'),
+        ('                         &compiler_info->nir_options[stage->stage]);\n'
+         '      nir->info.internal |= is_internal;\n',
+         '                         &compiler_info->nir_options[stage->stage]);\n'
+         '      if (nir == NULL) {\n'
+         '         fprintf(stderr, "EDEN_SPIRV_REJECTED stage %d, %u words: an empty shader in its place\\n",\n'
+         '                 (int)stage->stage, (unsigned)(stage->spirv.size / 4));\n'
+         '         nir_builder empty = nir_builder_init_simple_shader(stage->stage, &compiler_info->nir_options[stage->stage],\n'
+         '                                                             "eden_invalid_spirv");\n'
+         '         nir = empty.shader;\n'
+         '         if (stage->stage == MESA_SHADER_COMPUTE) {\n'
+         '            nir->info.workgroup_size[0] = 1;\n'
+         '            nir->info.workgroup_size[1] = 1;\n'
+         '            nir->info.workgroup_size[2] = 1;\n'
+         '         }\n'
+         '      }\n'
+         '      nir->info.internal |= is_internal;\n'),
+    ],
 }.items():
     original = root.parent/'mihawk-mesa-review'/relative
     destination = root.parent/'mihawk-vulkan-review/.deps/work/radv-src'/relative
