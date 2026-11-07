@@ -1,0 +1,66 @@
+diff --git a/src/core/hle/service/nx2_gsv.h b/src/core/hle/service/nx2_gsv.h
+index 4b18c6f..770c22e 100644
+--- a/src/core/hle/service/nx2_gsv.h
++++ b/src/core/hle/service/nx2_gsv.h
+@@ -3230,10 +3230,7 @@ private:
+             Tegra::Texture::SwizzleTexture(m_tiled, bytes, 4, static_cast<u32>(layout.pitch / 4),
+                                            layout.height, 1, 4, 0, 1, true);
+             memory.WriteBlock(address, m_tiled.data(), m_tiled.size());
+-            if (const auto device =
+-                    Nvidia::Devices::Nx2GpuMemoryRegistry::Get().DeviceAddressOf(address)) {
+-                system.GPU().InvalidateRegion(*device, m_tiled.size());
+-            }
++            InvalidateDecoderImage(address, m_tiled.size());
+             trace_write();
+             return {width, height};
+         }
+@@ -3246,13 +3243,38 @@ private:
+                               layout.pitch * ((height + 1) / 2));
+         }
+         // The game samples the image on the GPU: drop the texture cache's copy of the old frame.
+-        if (const auto device = Nvidia::Devices::Nx2GpuMemoryRegistry::Get().DeviceAddressOf(address)) {
+-            system.GPU().InvalidateRegion(*device, layout.size);
+-        }
++        InvalidateDecoderImage(address, layout.size);
+         trace_write();
+         return {width, height};
+     }
+ 
++    // Drops the texture cache's copy of a decoder image the CPU just wrote. Its device address
++    // comes from the nx2 GPU maps, or else (EglantinePS5 patch 0030) from the SMMU's own reverse
++    // map, page by page: Ocarina of Time's decoder images are reached by no nx2 map (the trace
++    // said mapped=false for every frame), so the GPU kept their first, black, contents.
++    void InvalidateDecoderImage(u64 address, u64 size) {
++        if (const auto device = Nvidia::Devices::Nx2GpuMemoryRegistry::Get().DeviceAddressOf(address)) {
++            system.GPU().InvalidateRegion(*device, size);
++            return;
++        }
++        constexpr u64 PageSize = 0x1000;
++        auto& memory = system.ApplicationMemory();
++        auto& smmu = system.Host1x().MemoryManager();
++        const u64 end = address + size;
++        for (u64 at = address; at < end;) {
++            const u64 chunk = (std::min)(end, (at & ~(PageSize - 1)) + PageSize) - at;
++            if (const u8* const pointer = memory.GetPointer(at);
++                pointer != nullptr && smmu.IsPhysicalPointer(pointer)) {
++                smmu.ApplyOpOnPointer(pointer, m_reverse_scratch, [&](DAddr device) {
++                    if (device >= PageSize) {
++                        system.GPU().InvalidateRegion(device, chunk);
++                    }
++                });
++            }
++            at += chunk;
++        }
++    }
++
+     // EDEN_NX2_VDEC_DUMP=<dir>: save the luma of every 120th decoded frame, a quarter of its size,
+     // as nx2-vdec-image-<id>-<frame>.pgm (apart from how the game shows it).
+     void DumpFrame(u32 image_id, const std::vector<u8>& bytes, const Nx2DecoderImageLayout& layout,
+@@ -3286,6 +3308,7 @@ private:
+     u32 m_syncpoint{NoSyncpoint}; ///< Counts finished frames (allocated at the first register)
+     u32 m_sync_base{};            ///< Its value before the first frame
+     std::vector<u8> m_tiled;      ///< Decode thread: block-linear copy of a frame (WriteImage)
++    Common::ScratchBuffer<u32> m_reverse_scratch; ///< InvalidateDecoderImage's device addresses
+ 
+     // Shared with the decode thread.
+     std::mutex m_mutex;

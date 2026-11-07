@@ -269,7 +269,6 @@ juego_arriba=on
 swap=on
 swap_bloque=on
 reserva_juego=32
-astc_bc1=on
 memoria_util=on
 memoria_corta=384
 margen_texturas=256
@@ -294,6 +293,7 @@ log_filter=*:Info
   - `anisotropico=N` pone la imagen blanca.
   - `gpu_accuracy=low` estropea la imagen.
   - El botón de foto del juego provoca brillos.
+  - `astc_bc1=on` era la causa de las manchas del suelo y del público en Mario Kart World (transparencia de 1 bit): no usarla.
 
 ### Cómo agregar una opción al laboratorio
 1. En `headless/lab.h`, junto a las demás:
