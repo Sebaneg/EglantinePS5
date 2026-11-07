@@ -41,12 +41,15 @@ meson setup "$dav1d_build/out" "$dav1d_source" --cross-file "$dav1d_build/cross.
 ninja -C "$dav1d_build/out" install
 # Its pkg-config file may ask for system libraries the console's link does not have (-ldl):
 # FFmpeg's configure links a probe with them and reports dav1d missing. dav1d alone is enough.
-sed -i -e '/^Libs.private:/d' -e '/^Requires.private:/d' "$install/lib/pkgconfig/dav1d.pc"
+# Meson puts it where FreeBSD keeps them, libdata/pkgconfig, for a 'freebsd' host.
+dav1d_pc=$(find "$install" -name dav1d.pc -print -quit)
+test -n "$dav1d_pc"
+sed -i -e '/^Libs.private:/d' -e '/^Requires.private:/d' "$dav1d_pc"
 
 cd "$scratch/ffmpeg-native"
 # Use the same pinned, minimal decoder set as the Linux core, with libdav1d for AV1. Avoid the
 # full prebuilt FFmpeg package's unrelated codec and C++ runtime dependencies.
-PKG_CONFIG_PATH="$install/lib/pkgconfig" bash "$source/configure" --prefix="$install" \
+PKG_CONFIG_PATH="$(dirname "$dav1d_pc")" bash "$source/configure" --prefix="$install" \
     --enable-cross-compile --arch=x86_64 --target-os=freebsd \
     --cc="bash $root/tools/ffmpeg-ps5-cc.sh" --ld="bash $root/tools/ffmpeg-ps5-cc.sh" \
     --ar=llvm-ar-18 --ranlib=llvm-ranlib-18 --nm=llvm-nm-18 \
