@@ -1946,7 +1946,10 @@ extern "C" std::size_t eden_guest_memory_emergency(std::size_t wanted) noexcept 
             candidates.emplace_back(range->physical[slot], slot);
     }
     if (guest_blocks_high.load(std::memory_order_relaxed)) std::sort(candidates.begin(), candidates.end());
-    constexpr std::size_t MostSlots = 256; // 512 MiB
+    // At most twice what was asked for (512 MiB at most): Mario Kart World at 1x sent 512 MiB to the
+    // swap file for each 2-4 MiB image (the pool's largest block never reached 64 MiB), then read it
+    // back, and the race stuttered.
+    const std::size_t MostSlots = std::clamp<std::size_t>(wanted * 2 / SparseSlot, 4, 256);
     // It runs on the thread whose allocation was refused, the GPU thread: with the SSD writing about
     // 1 MB/s, 512 MiB took minutes, and Mario Kart World froze leaving a race (the freeze watch ended
     // it after 30 s). At most EDEN_SWAP_EMERGENCY_MS (4000) of writing, and it looks at the largest

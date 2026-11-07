@@ -500,7 +500,9 @@ ALLOCATOR_REFUSED = """    VkResult created = CALL;
         // up to three times, before the session ends.
         for (int attempt = 0; created != VK_SUCCESS && attempt < 3; ++attempt) {
             const std::size_t freed =
-                eden_guest_memory_emergency ? eden_guest_memory_emergency(std::size_t{256} << 20) : 0;
+                eden_guest_memory_emergency
+                    ? eden_guest_memory_emergency(std::max<std::size_t>(std::size_t{32} << 20, static_cast<std::size_t>(ci.size) * 2))
+                    : 0;
             const std::size_t trimmed = ::Eden::Performance::TrimHeap("a graphics allocation was refused");
             if (freed == 0 && trimmed == 0) break;
             created = AGAIN;
@@ -608,13 +610,19 @@ adapt('src/video_core/vulkan_common/vulkan_memory_allocator.cpp', 'vulkan_memory
     # pieces, then part of the guest's reserve goes back to the pool, and it is asked for again.
     ('    if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY && ci.imageType != VK_IMAGE_TYPE_1D) {\n',
      """    if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY && !huge) {
+        // A block of its own first: it needs only the image's size, not a free block as large as
+        // the allocator's (the pool is in small pieces then). The swap file comes last and with
+        // little: 512 MiB sent for a 2-4 MiB image, then read back, made Mario Kart World stutter.
         VmaAllocationCreateInfo again = alloc_ci;
         again.flags &= ~static_cast<VmaAllocationCreateFlags>(VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT);
+        again.flags |= VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
+        result = vmaCreateImage(allocator, &ci, &again, &handle, &allocation, &alloc_info);
         for (int attempt = 0; result == VK_ERROR_OUT_OF_DEVICE_MEMORY && attempt < 3; ++attempt) {
-            const std::size_t freed =
-                eden_guest_memory_emergency ? eden_guest_memory_emergency(std::size_t{64} << 20) : 0;
-            const std::size_t trimmed = ::Eden::Performance::TrimHeap("an image was refused");
-            const std::size_t lent = freed == 0 && trimmed == 0 ? eden_guest_memory_lend(std::size_t{64} << 20) : 0;
+            std::size_t freed = 0;
+            const std::size_t trimmed = attempt == 0 ? ::Eden::Performance::TrimHeap("an image was refused") : 0;
+            const std::size_t lent = attempt <= 1 ? eden_guest_memory_lend(std::size_t{32} << 20) : 0;
+            if (trimmed == 0 && lent == 0 && eden_guest_memory_emergency)
+                freed = eden_guest_memory_emergency(std::size_t{16} << 20);
             if (freed == 0 && trimmed == 0 && lent == 0) break;
             result = vmaCreateImage(allocator, &ci, &again, &handle, &allocation, &alloc_info);
             static std::atomic<unsigned long long> rescued{0};
