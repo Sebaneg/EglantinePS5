@@ -1,0 +1,31 @@
+diff --git a/src/video_core/shader_environment.cpp b/src/video_core/shader_environment.cpp
+index 70ab113..1f0320f 100644
+--- a/src/video_core/shader_environment.cpp
++++ b/src/video_core/shader_environment.cpp
+@@ -543,6 +543,26 @@ std::shared_ptr<const LoweredNativeCode> GenericEnvironment::LowerNativeCode(u32
+                                    : stage == Shader::Stage::TessellationEval
+                                        ? Shader::Ampere::TessellationStage::Evaluation
+                                        : Shader::Ampere::TessellationStage::None;
++    // EglantinePS5 (after pattex67/Aubepine's patch 0026): a program with more matrix multiplies
++    // than EDEN_NX2_TENSOR_LIMIT (default 300; 0: no limit) is rejected. Ocarina of Time's DLSS
++    // networks have 464-768: their pipelines never finished building on the PS5's driver, and
++    // the game stopped at 24 of 27 cached pipelines while loading (or froze in play). Rejected,
++    // their dispatches are skipped and the DLSS replacement upscale draws the image, as it does
++    // whenever the game's own network is off. Kirby Air Riders needs 288.
++    if (static const size_t tensor_limit = [] {
++            const char* const value = std::getenv("EDEN_NX2_TENSOR_LIMIT");
++            return value ? static_cast<size_t>(std::strtoull(value, nullptr, 10)) : size_t{300};
++        }();
++        tensor_limit != 0) {
++        const size_t hmma = static_cast<size_t>(std::count_if(
++            native.begin(), native.end(),
++            [](const auto& insn) { return insn.Bits(0, 12) == 0x23c && insn.Bits(12, 4) != 15; }));
++        if (hmma > tensor_limit) {
++            throw Shader::RuntimeError("Native shader at {:#x}: {} matrix multiplies, over "
++                                       "EDEN_NX2_TENSOR_LIMIT ({}); rejected",
++                                       program_base, hmma, tensor_limit);
++        }
++    }
+     auto lowered = Shader::Ampere::LowerToMaxwell(
+         native, {.geometry = geometry_stage,
+                  .tensor = true,

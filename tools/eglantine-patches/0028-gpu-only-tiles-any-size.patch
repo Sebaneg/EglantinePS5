@@ -1,5 +1,5 @@
 diff --git a/src/core/hle/service/nx2_gsv.h b/src/core/hle/service/nx2_gsv.h
-index 7c0fe04..37b6755 100644
+index 7c0fe04..4b18c6f 100644
 --- a/src/core/hle/service/nx2_gsv.h
 +++ b/src/core/hle/service/nx2_gsv.h
 @@ -1085,7 +1085,10 @@ private:
@@ -7,10 +7,10 @@ index 7c0fe04..37b6755 100644
              const char* value = std::getenv("EDEN_NX2_GPU_ONLY_TILES_MIB");
              const u64 mib = value != nullptr ? std::strtoull(value, nullptr, 10) : 0;
 -            return (mib >= 286 ? mib : 1024ULL) << 20;
-+            // From 1 MiB (EglantinePS5 patch 0028): title 1's terrain masks live in GPU-only
-+            // regions under 286 MiB, and maps into a region that keeps its own memory are left
++            // Any size, 0 included (EglantinePS5 patch 0028): title 1's terrain masks live in
++            // 256 KiB GPU-only regions, and maps into a region that keeps its own memory are left
 +            // out, so they read zero (the road's sand and asphalt blend into hard splotches).
-+            return (mib >= 1 ? mib : 1024ULL) << 20;
++            return value != nullptr ? mib << 20 : 1024ULL << 20;
          }();
          return size;
      }

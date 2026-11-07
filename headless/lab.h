@@ -202,7 +202,7 @@ inline bool ApplyEarly(const std::string& entry, bool& block_list_set) {
         SetVariable("EDEN_NX2_TRANSCODE_INFLIGHT_MIB", entry.c_str() + 14);
     else if (entry.starts_with("capas_max=") && Number(entry, 10, n) && n >= 128 && n <= 768)
         SetVariable("EDEN_NX2_LAYERS_CAP_MIB", entry.c_str() + 10);
-    else if (entry.starts_with("zonas_gpu_minimo=") && Number(entry, 17, n) && n >= 1 && n <= 1024)
+    else if (entry.starts_with("zonas_gpu_minimo=") && Number(entry, 17, n) && n <= 1024)
         SetVariable("EDEN_NX2_GPU_ONLY_TILES_MIB", entry.c_str() + 17);
     else if (entry == "sparse=off") DevVulkan::disable_sparse = true;
     else if (entry == "multirange=off") DevVulkan::disable_multi_range = true;
