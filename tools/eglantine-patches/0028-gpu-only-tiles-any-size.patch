@@ -1,0 +1,40 @@
+diff --git a/src/core/hle/service/nx2_gsv.h b/src/core/hle/service/nx2_gsv.h
+index 7c0fe04..37b6755 100644
+--- a/src/core/hle/service/nx2_gsv.h
++++ b/src/core/hle/service/nx2_gsv.h
+@@ -1085,7 +1085,10 @@ private:
+         static const u64 size = [] {
+             const char* value = std::getenv("EDEN_NX2_GPU_ONLY_TILES_MIB");
+             const u64 mib = value != nullptr ? std::strtoull(value, nullptr, 10) : 0;
+-            return (mib >= 286 ? mib : 1024ULL) << 20;
++            // From 1 MiB (EglantinePS5 patch 0028): title 1's terrain masks live in GPU-only
++            // regions under 286 MiB, and maps into a region that keeps its own memory are left
++            // out, so they read zero (the road's sand and asphalt blend into hard splotches).
++            return (mib >= 1 ? mib : 1024ULL) << 20;
+         }();
+         return size;
+     }
+@@ -1173,6 +1176,7 @@ private:
+     u64 m_tile_maps{};
+     u64 m_tile_unmaps{};
+     u64 m_tile_kept{}; ///< Maps into GPU-only regions that keep their own memory, left out
++    std::set<u64> m_kept_logged; ///< Regions whose left-out maps were logged once
+     u64 m_tile_bytes{}; ///< Sparse region pages a tile maps right now
+ 
+     void ApplySparseMapRequest(const SparseMapRequest& request) {
+@@ -1287,8 +1291,14 @@ private:
+             return;
+         }
+         ++m_tile_maps;
+-        if (m_sparse_regions.contains(region)) {
++        if (const auto kept = m_sparse_regions.find(region); kept != m_sparse_regions.end()) {
+             ++m_tile_kept;
++            if (m_kept_logged.insert(region).second) {
++                LOG_WARNING(Service,
++                            "nx2:gpu 216 maps into GPU-only region {:#x} ({} MiB) left out: it "
++                            "keeps its own memory (lab file zonas_gpu_minimo=N lets it take them)",
++                            region, kept->second.size >> 20);
++            }
+             return;
+         }
+         if (m_shared_regions.contains(region)) {

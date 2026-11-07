@@ -22,6 +22,16 @@
       "creates": ".deps/fmt-12.1.0/include/fmt/format.h"
     },
     {
+      "name": "dav1d",
+      "about": "dav1d 1.5.1 (VideoLAN's AV1 decoder) for FFmpeg's libdav1d: Switch 2 titles' AV1 movies (Ocarina of Time's)",
+      "kind": "archive",
+      "url": "https://github.com/videolan/dav1d/archive/refs/tags/1.5.1.tar.gz",
+      "sha256": "fa635e2bdb25147b1384007c83e15de44c589582bb3b9a53fc1579cb9d74b695",
+      "save": ".deps/dav1d-1.5.1.tar.gz",
+      "extract": ".deps",
+      "creates": ".deps/dav1d-1.5.1/meson.build"
+    },
+    {
       "name": "compiler-rt",
       "about": "LLVM 18.1.8 emulated-TLS runtime (emutls.c and its headers) for the PS5 build",
       "kind": "files",
