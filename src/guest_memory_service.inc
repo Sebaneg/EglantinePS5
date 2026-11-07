@@ -1936,10 +1936,22 @@ extern "C" std::size_t eden_guest_memory_emergency(std::size_t wanted) noexcept 
 #ifdef PS5_NATIVE
     SparseRange* const range = service_range.load(std::memory_order_acquire);
     if (range == nullptr || range->swap == nullptr || swap_fd < 0) return 0;
+    // An allocation refused inside it (the list below) asks for it again on this thread
+    // (headless/heap_arenas.inc, eden_heap_rescue): that one gets nothing, instead of locking the
+    // mutex twice (Mario Kart World ended on "Resource deadlock avoided").
+    static thread_local bool inside = false;
+    if (inside) return 0;
     static std::mutex emergency;
     const std::lock_guard guard{emergency};
+    inside = true;
+    struct Leave { ~Leave() { inside = false; } } leave;
     const std::size_t slots = (range->end - range->begin.load(std::memory_order_relaxed)) / SparseSlot;
     std::vector<std::pair<std::int64_t, std::size_t>> candidates;
+    try {
+        candidates.reserve(slots);
+    } catch (const std::bad_alloc&) {
+        return 0; // no memory even for the list: the caller goes on without it
+    }
     for (std::size_t slot = 0; slot < slots; ++slot) {
         const std::uint8_t value = range->state[slot].load(std::memory_order_acquire);
         if (!(value & SlotLock) && ((value & SlotMask) == SlotOwn || (value & SlotMask) == SlotProbe))
