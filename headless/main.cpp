@@ -64,6 +64,9 @@
 #include "eglantineps5/frontend.h"
 #include "eglantineps5/version.h"
 extern "C" void ps5_opengl_heap_snapshot(const char*, unsigned);
+// What a refused heap allocation tries before the session ends (std::set_new_handler, below).
+extern "C" std::size_t eden_heap_trim(void) __attribute__((weak));
+extern "C" std::size_t eden_guest_memory_emergency(std::size_t wanted) noexcept __attribute__((weak));
 extern "C" std::int64_t sceKernelGetDirectMemorySize();
 #else
 #include <malloc.h>
@@ -313,6 +316,29 @@ int main(int argc, char** argv) {
                                   Eden::FileExists(std::string{folder} + "/ui/fonts/montserrat-medium.pefont") ? "yes" : "no");
         Eden::BootTrace::Line("app folder: %s", Eden::AppDir().c_str());
         std::set_new_handler([] {
+            // As a refused graphics allocation does (tools/prepare-vulkan-port.py): the guest's
+            // memory next to the graphics goes to the swap file and the heap gives back its empty
+            // pieces, then the allocation is tried again, up to 3 times in a row on this thread.
+            // Mario Kart World at 1x ended here before a race with an 88 MiB heap block refused.
+            thread_local int tries = 0;
+            thread_local bool inside = false;
+            thread_local auto last = std::chrono::steady_clock::time_point{};
+            const auto now = std::chrono::steady_clock::now();
+            if (now - last > std::chrono::seconds{5}) tries = 0;
+            last = now;
+            if (!inside && tries < 3) {
+                inside = true;
+                ++tries;
+                const std::size_t sent = eden_guest_memory_emergency ? eden_guest_memory_emergency(std::size_t{256} << 20) : 0;
+                const std::size_t trimmed = eden_heap_trim ? eden_heap_trim() : 0;
+                inside = false;
+                char line[128];
+                std::snprintf(line, sizeof(line),
+                              "[EglantinePS5] heap short: %zu MiB of the guest's memory to swap, %zu MiB given back; trying again (%d)\n",
+                              sent >> 20, trimmed >> 20, tries);
+                std::fputs(line, stderr);
+                if (sent != 0 || trimmed != 0) return;
+            }
             ps5_opengl_heap_snapshot("allocation_failure", 0);
             std::fflush(stdout);
             Eden::Report("allocation failure", "operator new: heap exhausted");

@@ -989,8 +989,12 @@ bool CommitMemoryRangeFrom(void* address, std::size_t size, bool high) noexcept 
     while (done < size) {
         block = std::min(block, size - done);
         std::int64_t physical = -1;
-        const int taken = high ? eden_direct_high(block, LargePage, 12, &physical)
-                               : eden_direct_low(block, LargePage, 12, &physical);
+        int taken = high ? eden_direct_high(block, LargePage, 12, &physical)
+                         : eden_direct_low(block, LargePage, 12, &physical);
+        // Not one large page left in the pool: a block of the guest's reserve, as the JIT's code
+        // cache takes (half of the reserve stays for the guest). Mario Kart World at 1x ended with
+        // an 88 MiB heap block refused while the reserve held 256 MiB.
+        if (taken != 0 && block == LargePage && TakeHostReserveBlock(&physical)) taken = 0;
         if (taken != 0) {
             if (block == LargePage) break;  // not even one large page left
             block = std::max(LargePage, block / 2 / LargePage * LargePage);
