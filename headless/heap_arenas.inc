@@ -996,9 +996,12 @@ static int eden_tcache_keep(void *address, size_t usable) {
  * asks for memory, as far as the first calls up say. Sampled blocks count EDEN_SITE_RATE times. */
 extern const char __eden_text_start[];
 extern const char __eden_text_end[];
-#define EDEN_SITE_BLOCKS 131072u
-#define EDEN_SITE_TABLE 4096u
-#define EDEN_SITE_PCS 6u
+/* 524288 blocks (16 MiB): with 131072 the table filled within minutes in Mario Kart World and
+ * further samples were dropped unseen (454 MiB followed of a 2.7 GiB heap). Ten return addresses:
+ * the first ones are the allocator's own wrappers. */
+#define EDEN_SITE_BLOCKS 524288u
+#define EDEN_SITE_TABLE 8192u
+#define EDEN_SITE_PCS 10u
 #define EDEN_SITE_RATE 128u
 #define EDEN_SITE_BIG ((size_t)1 << 20)
 
@@ -1013,6 +1016,9 @@ static struct {
   uintptr_t pcs[EDEN_SITE_PCS];
   _Atomic long exact_bytes, sampled_bytes, exact_blocks, sampled_blocks;
 } eden_site_table[EDEN_SITE_TABLE];
+
+/* Samples that found no room: in the block table or the site table. The report says how many. */
+static _Atomic long eden_site_dropped_blocks, eden_site_dropped_sites;
 
 static int eden_site_sampled(const void *address) {
   return (((uintptr_t)address * 0x9E3779B97F4A7C15ull) >> 57) == 0;
@@ -1032,7 +1038,7 @@ static __attribute__((noinline)) unsigned eden_site_collect(uintptr_t pcs[EDEN_S
    * above, and what lies after it is not mapped. */
   const uintptr_t page_end = (((uintptr_t)stack | 0x3FFFu) + 1);
   const unsigned room = (unsigned)((page_end - (uintptr_t)stack) / sizeof(uintptr_t));
-  for (unsigned i = 0; i < 128 && i < room && found < EDEN_SITE_PCS; ++i) {
+  for (unsigned i = 0; i < 256 && i < room && found < EDEN_SITE_PCS; ++i) {
     const uintptr_t value = stack[i];
     /* The app's code is execute-only on the console: its bytes cannot be read to check that the
      * address follows a call (the system ends the process). A stale word of the stack can be taken
@@ -1074,8 +1080,10 @@ static __attribute__((noinline)) void eden_site_alloc(const void *address, size_
       break;
     }
   }
-  if (site == EDEN_SITE_TABLE)
+  if (site == EDEN_SITE_TABLE) {
+    atomic_fetch_add_explicit(&eden_site_dropped_sites, 1, memory_order_relaxed);
     return;
+  }
   const unsigned first = eden_site_slot(address);
   for (unsigned probe = 0; probe < 16; ++probe) {
     const unsigned at = (first + probe) % EDEN_SITE_BLOCKS;
@@ -1097,6 +1105,7 @@ static __attribute__((noinline)) void eden_site_alloc(const void *address, size_
       return;
     }
   }
+  atomic_fetch_add_explicit(&eden_site_dropped_blocks, 1, memory_order_relaxed);
 }
 
 static void eden_site_free(const void *address, size_t usable) {
@@ -1132,7 +1141,7 @@ void eden_heap_sites_report(void) {
   struct {
     long bytes, blocks;
     unsigned site;
-  } top[12];
+  } top[20];
   unsigned count = 0;
   long total = 0;
   for (unsigned at = 0; at < EDEN_SITE_TABLE; ++at) {
@@ -1148,12 +1157,12 @@ void eden_heap_sites_report(void) {
       continue;
     total += bytes;
     unsigned place = count;
-    if (count < 12)
+    if (count < 20)
       ++count;
-    else if (bytes <= top[11].bytes)
+    else if (bytes <= top[19].bytes)
       continue;
     else
-      place = 11;
+      place = 19;
     while (place > 0 && top[place - 1].bytes < bytes) {
       top[place] = top[place - 1];
       --place;
@@ -1162,7 +1171,11 @@ void eden_heap_sites_report(void) {
     top[place].blocks = blocks;
     top[place].site = at;
   }
-  fprintf(stderr, "EDEN_HEAP_SITES followed blocks hold %ld MiB; the largest places:\n", total >> 20);
+  fprintf(stderr,
+          "EDEN_HEAP_SITES followed blocks hold %ld MiB (samples dropped: %ld without a block slot, %ld "
+          "without a site slot); the largest places:\n",
+          total >> 20, atomic_load_explicit(&eden_site_dropped_blocks, memory_order_relaxed),
+          atomic_load_explicit(&eden_site_dropped_sites, memory_order_relaxed));
   for (unsigned i = 0; i < count; ++i) {
     const unsigned at = top[i].site;
     fprintf(stderr, "EDEN_HEAP_SITE %ld MiB in %ld blocks:", top[i].bytes >> 20, top[i].blocks);
