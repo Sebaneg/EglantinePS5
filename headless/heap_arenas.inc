@@ -60,6 +60,8 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
+#include <unistd.h>
 
 #define EDEN_HEAP_ARENA_SHIFT 23u /* 8 MiB arenas and slots */
 #define EDEN_HEAP_ARENA_SIZE (1u << EDEN_HEAP_ARENA_SHIFT)
@@ -1283,7 +1285,58 @@ void eden_heap_sites_report(void) {
   }
 }
 
+/* Before an allocation fails: the heap's empty spaces go back and the guest's memory next to the
+ * graphics goes to the swap file (about twice the request), then it is tried again. The graphics
+ * driver's compiler does not check what malloc returns: Ocarina of Time ended after 18 minutes on a
+ * NULL in radv_shader_spirv_to_nir with the pool's largest block at 32 MiB. At most 3 rescues per
+ * thread in 5 s, and none from inside one (the swap's emergency allocates). */
+size_t eden_guest_memory_emergency(size_t wanted) __attribute__((weak));
+static _Thread_local int eden_heap_rescuing;
+static _Thread_local int eden_heap_rescues;
+static _Thread_local long long eden_heap_rescue_last;
+static atomic_ulong eden_heap_rescued;
+
+static int eden_heap_rescue(size_t bytes) {
+  if (eden_heap_rescuing || bytes > ((size_t)4 << 30))
+    return 0;
+  struct timespec now;
+  clock_gettime(CLOCK_MONOTONIC, &now);
+  const long long seconds = (long long)now.tv_sec;
+  if (seconds - eden_heap_rescue_last > 5)
+    eden_heap_rescues = 0;
+  eden_heap_rescue_last = seconds;
+  if (eden_heap_rescues >= 3)
+    return 0;
+  ++eden_heap_rescues;
+  eden_heap_rescuing = 1;
+  const size_t trimmed = eden_heap_trim();
+  size_t wanted = bytes * 2;
+  if (wanted < ((size_t)32 << 20))
+    wanted = (size_t)32 << 20;
+  const size_t sent = eden_guest_memory_emergency ? eden_guest_memory_emergency(wanted) : 0;
+  eden_heap_rescuing = 0;
+  const unsigned long times = atomic_fetch_add_explicit(&eden_heap_rescued, 1, memory_order_relaxed) + 1;
+  if ((times & (times - 1)) == 0) { /* the 1st, 2nd, 4th, 8th ... time */
+    char line[160];
+    const int length = snprintf(line, sizeof(line),
+                                "EDEN_HEAP_RESCUE %lu: %zu bytes refused; %zu MiB of the heap given back, %zu MiB "
+                                "of the guest's memory to the swap file\n",
+                                times, bytes, trimmed >> 20, sent >> 20);
+    if (length > 0)
+      (void)write(2, line, (size_t)length < sizeof(line) ? (size_t)length : sizeof(line) - 1);
+  }
+  return trimmed != 0 || sent != 0;
+}
+
+static void *eden_heap_allocate_once(size_t count, size_t size, int zero);
 static void *eden_heap_allocate(size_t count, size_t size, int zero) {
+  void *block = eden_heap_allocate_once(count, size, zero);
+  while (block == NULL && eden_heap_rescue(count * size))
+    block = eden_heap_allocate_once(count, size, zero);
+  return block;
+}
+
+static void *eden_heap_allocate_once(size_t count, size_t size, int zero) {
   const size_t bytes = count * size;
   if (bytes >= EDEN_HEAP_LARGE_REQUEST && eden_heap_grows) {
     /* Memory of its own (it arrives zeroed). With every entry taken, or no memory left to take,
@@ -1436,6 +1489,8 @@ int __wrap_posix_memalign(void **address, size_t alignment, size_t size) {
       result = ENOMEM;
     }
   }
+  if (result != 0 && eden_heap_rescue(size))
+    return __wrap_posix_memalign(address, alignment, size);
   if (result == 0) {
     eden_heap_record(*address, size);
     eden_site_alloc(*address, size);

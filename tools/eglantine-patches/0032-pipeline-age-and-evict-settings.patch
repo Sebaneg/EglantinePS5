@@ -1,0 +1,56 @@
+diff --git a/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp b/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp
+--- a/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp
++++ b/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp
+@@ -680,12 +680,34 @@
+ constexpr u8 UsedPipelinesMaxAgeMoltenVK = 8;
+ 
+ u8 MaxUsedPipelineAge(const Device& device) {
++    // EDEN_NX2_USED_PIPELINE_AGE=<1-16>: fewer sessions kept, fewer pipelines built at boot. On the
++    // console each holds ~0.45 MB of the 12 GiB the CPU and GPU share: Mario Kart World built 3,109
++    // at boot (every course of sixteen sessions) and the heap started at 1-1.4 GB.
++    static const u8 forced = [] {
++        const char* value = std::getenv("EDEN_NX2_USED_PIPELINE_AGE");
++        const unsigned long age = value != nullptr ? std::strtoul(value, nullptr, 10) : 0;
++        return static_cast<u8>(age >= 1 && age <= UsedPipelinesMaxAge ? age : 0);
++    }();
++    if (forced != 0) {
++        return forced;
++    }
+     if (device.IsMoltenVK()) {
+         return UsedPipelinesMaxAgeMoltenVK;
+     }
+     return UsedPipelinesMaxAge;
+ }
+ 
++// EDEN_NX2_PIPELINE_EVICT_FRAMES=<600-100000>: frames a graphics pipeline goes unused before it is
++// destroyed (9000 without it). Fewer keep the heap from growing with every place a session goes.
++u64 EvictAfterFramesSetting() {
++    static const u64 frames = [] {
++        const char* value = std::getenv("EDEN_NX2_PIPELINE_EVICT_FRAMES");
++        const unsigned long long wanted = value != nullptr ? std::strtoull(value, nullptr, 10) : 0;
++        return wanted >= 600 && wanted <= 100000 ? static_cast<u64>(wanted) : u64{9000};
++    }();
++    return frames;
++}
++
+ std::unordered_map<u64, u8> LoadUsedPipelines(const std::filesystem::path& path, u8 max_age) {
+     std::unordered_map<u64, u8> used;
+     std::ifstream file{path, std::ios::binary};
+@@ -1147,7 +1169,7 @@
+     while (!evicted_pipelines.empty() && scheduler.IsFree(evicted_pipelines.front().first)) {
+         evicted_pipelines.pop_front();
+     }
+-    constexpr u64 EvictCheckFrames = 600;
++    const u64 EvictCheckFrames = std::min<u64>(600, EvictAfterFramesSetting() / 3);
+     if (frame_count % EvictCheckFrames == 0) {
+         EvictUnusedPipelines();
+     }
+@@ -1162,7 +1184,7 @@
+     // Each built pipeline holds ~0.45 MB of driver memory and none was ever destroyed, so it grew
+     // with every place a session went (title 1: 1,500 on its title screen alone). One unused for
+     // this long is destroyed; it takes 2-3 ms to build again from the driver's pipeline cache.
+-    constexpr u64 EvictAfterFrames = 9000;
++    const u64 EvictAfterFrames = EvictAfterFramesSetting();
+     if (frame_count <= EvictAfterFrames) {
+         return;
+     }
