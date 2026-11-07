@@ -157,7 +157,7 @@ int main() {
             assert(mincore(const_cast<unsigned char*>(gone), page, &state)==-1 && errno==ENOMEM);
         }
 #ifdef EDEN_JIT_ALIAS_NATIVE
-        assert(handles.size()==4);
+        assert(handles.size()==size/(std::size_t(2)<<20)); // 2 MiB blocks (src/memory_pages.cpp)
         for (int fd : handles) { errno=0; assert(fcntl(fd,F_GETFD)==-1 && errno==EBADF); }
         reserve_ok=false;
 #endif
