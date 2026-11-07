@@ -39,6 +39,9 @@ meson setup "$dav1d_build/out" "$dav1d_source" --cross-file "$dav1d_build/cross.
     --prefix="$install" --libdir=lib --buildtype=release --default-library=static \
     -Denable_tools=false -Denable_tests=false -Denable_examples=false -Denable_docs=false
 ninja -C "$dav1d_build/out" install
+# Its pkg-config file may ask for system libraries the console's link does not have (-ldl):
+# FFmpeg's configure links a probe with them and reports dav1d missing. dav1d alone is enough.
+sed -i -e '/^Libs.private:/d' -e '/^Requires.private:/d' "$install/lib/pkgconfig/dav1d.pc"
 
 cd "$scratch/ffmpeg-native"
 # Use the same pinned, minimal decoder set as the Linux core, with libdav1d for AV1. Avoid the
@@ -52,7 +55,8 @@ PKG_CONFIG_PATH="$install/lib/pkgconfig" bash "$source/configure" --prefix="$ins
     --disable-avdevice --disable-avformat --disable-network --disable-swresample \
     --enable-libdav1d --enable-decoder=h264,vp8,vp9,libdav1d \
     --enable-filter=yadif,scale --enable-pic \
-    --enable-pthreads --disable-shared --enable-static
+    --enable-pthreads --disable-shared --enable-static ||
+    { tail -n 60 ffbuild/config.log; exit 1; }
 make -j"${EDEN_BUILD_JOBS:-$(nproc)}"
 make install
 
