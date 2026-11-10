@@ -328,6 +328,10 @@ inline bool ApplyEarly(const std::string& entry, bool& block_list_set) {
     // swap_comprimido=off: slots sent out go to the swap file only, not compressed into memory first
     // (src/guest_memory_service.inc, "The swap in memory"). Read as the game starts.
     else if (entry == "swap_comprimido=off") SetVariable("EDEN_SWAP_COMPRESS", "0");
+    // swap_adelantado=MiB (1536 to 4096): below this much free, slots nobody touched are compressed
+    // into memory ahead of a shortage, never written to the file (src/guest_memory_service.inc).
+    else if (entry.starts_with("swap_adelantado=") && Number(entry, 16, n) && n >= 1536 && n <= 4096)
+        SetVariable("EDEN_SWAP_PACK_AHEAD_MIB", entry.c_str() + 16);
     // atajos_bufer=off: no effect since Lichii (Eglantine patch 0016 left: Lichii skips clean buffers
     // itself); kept so older lab files still read.
     else if (entry == "atajos_bufer=off") {}

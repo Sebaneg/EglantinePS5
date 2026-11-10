@@ -61,7 +61,7 @@ struct Counters {
     std::atomic<std::uint64_t> out_io_worst_us{0}, in_io_worst_us{0}, out_copy_worst_us{0}, in_copy_worst_us{0};
     // The swap in memory: slots held compressed now and their bytes, slots compressed in all and those
     // that did not compress enough (to the file), time to compress and to decompress (us).
-    std::atomic<std::uint64_t> packed_slots{0}, packed_bytes{0}, packs{0}, pack_misses{0};
+    std::atomic<std::uint64_t> packed_slots{0}, packed_bytes{0}, packs{0}, pack_misses{0}, packed_ahead{0};
     std::atomic<std::uint64_t> pack_us{0}, unpack_us{0}, pack_worst_us{0}, unpack_worst_us{0};
 };
 Counters counters;
@@ -594,16 +594,23 @@ PackedSlot* Pack(const void* source) noexcept {
     return packed;
 }
 
-bool SwapOut(SparseRange& range, std::size_t slot) noexcept {
+// `pack_only` (the swapper ahead of a shortage, lab file swap_adelantado): a slot that does not
+// compress stays as it was instead of going to the file.
+bool SwapOut(SparseRange& range, std::size_t slot, bool pack_only = false) noexcept {
     const std::uintptr_t at = SlotAddress(range, slot);
     // An Own slot (the emergency takes those too) is writable; a Probe slot has no access.
     const int restore = SlotState(range, slot) == SlotOwn ? PROT_READ | PROT_WRITE : PROT_NONE;
+    if (pack_only && (range.packed == nullptr || !CanPack())) return false;
     // Read-only while it goes out: a reader goes on, a writer waits for the lock.
     if (mprotect(reinterpret_cast<void*>(at), SparseSlot, PROT_READ) != 0) return false;
     PackedSlot* packed = nullptr;
     if (range.packed != nullptr) {
         EdenDoingScope doing{"swap: compressing a slot into memory"};
         packed = Pack(reinterpret_cast<const void*>(at));
+    }
+    if (pack_only && packed == nullptr) {
+        if (mprotect(reinterpret_cast<void*>(at), SparseSlot, restore) != 0) std::abort();
+        return false;
     }
     std::uint32_t place = 0;
     if (packed == nullptr) {
@@ -1398,7 +1405,7 @@ void ServiceReport(SparseRange& range, const char* when) noexcept {
         char pack_line[384];
         const int pack_length = std::snprintf(pack_line, sizeof(pack_line),
             "EDEN_SWAP_PACK %s on=%d held_slots=%llu held_mib=%.1f of_mib=%llu ratio=%.2f packs=%llu "
-            "not_compressible=%llu pack_avg_ms=%.2f pack_worst_ms=%.1f unpack_avg_ms=%.2f unpack_worst_ms=%.1f\n",
+            "not_compressible=%llu pack_avg_ms=%.2f pack_worst_ms=%.1f unpack_avg_ms=%.2f unpack_worst_ms=%.1f ahead=%llu\n",
             when, CanPack() ? 1 : 0, (unsigned long long)held_slots, held_bytes / 1048576.0,
             (unsigned long long)(held_slots * (SparseSlot >> 20)),
             held_slots == 0 ? 0.0 : static_cast<double>(held_bytes) / static_cast<double>(held_slots * SparseSlot),
@@ -1406,7 +1413,7 @@ void ServiceReport(SparseRange& range, const char* when) noexcept {
             packs + misses == 0 ? 0.0 : counters.pack_us.load() / 1000.0 / static_cast<double>(packs + misses),
             counters.pack_worst_us.exchange(0) / 1000.0,
             counters.swap_ins.load() == 0 ? 0.0 : counters.unpack_us.load() / 1000.0 / static_cast<double>(counters.swap_ins.load()),
-            counters.unpack_worst_us.exchange(0) / 1000.0);
+            counters.unpack_worst_us.exchange(0) / 1000.0, (unsigned long long)counters.packed_ahead.load());
         if (pack_length > 0 && packs + misses != 0) Report(pack_line);
     }
     // Who wrote the slots that were promoted: the largest places (offsets in the app's image).
@@ -1500,6 +1507,15 @@ void ScannerLoop(SparseRange* range) {
 // sent 1113 slots out (1.6 GB free in all) while the largest block stayed at 214 MiB.
 std::thread swapper;
 std::atomic<unsigned> swap_cold_seconds{8};
+// Lab file swap_adelantado=MiB (EDEN_SWAP_PACK_AHEAD_MIB; 0, the default: off). While the pool has
+// less than this free in all (and more than the 1 GiB the swap starts at), the swapper compresses
+// slots nobody touched into memory, a few a round, and never writes them to the file: the room an
+// area change asks for at once is there before it asks (PS5_Lichii keeps 2.5 GiB so; Mario Kart World
+// here met its loads at 154 MiB free and sent 10 GB to the SSD in one session). One that does not
+// compress is left alone for 5 minutes.
+std::atomic<std::size_t> pack_ahead_bytes{0};
+constexpr std::size_t PackAheadPerRound = 8;
+constexpr std::uint32_t PackAheadRefusedSeconds = 300;
 constexpr std::size_t SwapProbeBytes = std::size_t{2560} << 20, SwapShortBytes = std::size_t{1024} << 20;
 constexpr std::size_t SwapEnoughBytes = std::size_t{1536} << 20, SwapQuietBytes = std::size_t{3072} << 20;
 constexpr std::size_t ProbePerRound = 32, SwapPerRound = 32;
@@ -1561,8 +1577,9 @@ void SwapperLoop(SparseRange* range) {
         FreeDropped(); // packed slots read back since the last round
         const bool wanted = memory_waiters.load(std::memory_order_acquire) != 0;
         // The whole pool is looked through only when its largest block says it may be short.
-        std::size_t free = PoolLargestFree() >= SwapQuietBytes && !wanted ? ~std::size_t{0} : PoolFree();
-        if (free < SwapProbeBytes || wanted) {
+        const std::size_t ahead = pack_ahead_bytes.load(std::memory_order_relaxed);
+        std::size_t free = PoolLargestFree() >= std::max(SwapQuietBytes, ahead) && !wanted ? ~std::size_t{0} : PoolFree();
+        if (free < std::max(SwapProbeBytes, ahead + (std::size_t{512} << 20)) || wanted) {
             EdenDoingScope doing{"swap: putting slots on probation (mprotect)"};
             for (std::size_t probed = 0, looked = 0; probed < ProbePerRound && looked < slots; ++looked) {
                 const std::size_t slot = hand;
@@ -1629,6 +1646,27 @@ void SwapperLoop(SparseRange* range) {
                     if (largest < streak_largest + SwapBlockGain) paused_until = now + SwapBlockPauseSeconds;
                     streak_bytes = 0;
                     streak_largest = largest;
+                }
+            }
+        }
+        // Ahead of a shortage (swap_adelantado): compressed into memory only, on this thread, so the
+        // game waits for none of it.
+        if (ahead != 0 && !short_free && free < ahead && range->packed != nullptr && CanPack()) {
+            EdenDoingScope doing{"swap: compressing slots ahead of a shortage"};
+            const unsigned cold = swap_cold_seconds.load(std::memory_order_relaxed);
+            std::size_t packed_now = 0;
+            for (std::size_t slot = 0; slot < slots && packed_now < PackAheadPerRound && free < ahead; ++slot) {
+                if (SlotState(*range, slot) != SlotProbe || now - range->probe_at[slot] < cold) continue;
+                if (range->hot_until != nullptr && now < range->hot_until[slot]) continue; // refused lately
+                LockSlot(*range, slot);
+                const bool out = SlotState(*range, slot) == SlotProbe && SwapOut(*range, slot, true);
+                UnlockSlot(*range, slot, out ? SlotSwapped : SlotState(*range, slot));
+                if (out) {
+                    ++packed_now;
+                    free += SparseSlot;
+                    counters.packed_ahead.fetch_add(1, std::memory_order_relaxed);
+                } else if (SlotState(*range, slot) == SlotProbe) {
+                    MarkHot(*range, slot, PackAheadRefusedSeconds);
                 }
             }
         }
@@ -1804,6 +1842,10 @@ void ServiceStart(SparseRange& range) noexcept {
         swap_for_block.store(for_block != nullptr && for_block[0] == '1', std::memory_order_relaxed);
         const char* compress = std::getenv("EDEN_SWAP_COMPRESS");
         pack_slots.store(!(compress != nullptr && compress[0] == '0'), std::memory_order_relaxed);
+        const char* ahead_mib = std::getenv("EDEN_SWAP_PACK_AHEAD_MIB");
+        const unsigned long ahead = ahead_mib != nullptr ? std::strtoul(ahead_mib, nullptr, 10) : 0;
+        pack_ahead_bytes.store(ahead >= 1536 && ahead <= 4096 ? std::size_t{ahead} << 20 : 0,
+                               std::memory_order_relaxed);
         const char* hot = std::getenv("EDEN_SWAP_HOT_SECONDS");
         swap_hot_seconds.store(static_cast<std::uint32_t>(
                                    std::min<unsigned long>(hot != nullptr ? std::strtoul(hot, nullptr, 10) : 120, 3600)),

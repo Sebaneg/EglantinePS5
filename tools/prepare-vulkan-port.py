@@ -1608,11 +1608,24 @@ adapt('src/video_core/renderer_vulkan/present/lsfg_shaders.cpp', 'vulkan_lsfg_sh
 # and the renderer is built per game session.
 adapt('src/video_core/renderer_vulkan/present/frame_gen.h',
       'include/video_core/renderer_vulkan/present/frame_gen.h', [
-    ('    bool dumped{};', '    bool dumped{};\n    bool generation_reported{};\n    bool storage_reported{};'),
+    ('    bool dumped{};', '    bool dumped{};\n    bool generation_reported{};\n    bool storage_reported{};\n'
+     '    bool idle_reported{};\n    u64 status_frames{};'),
 ])
 adapt('src/video_core/renderer_vulkan/present/frame_gen.cpp', 'vulkan_frame_gen.cpp', [
     ('#include "video_core/vulkan_common/vulkan_device.h"',
      '#include "video_core/vulkan_common/vulkan_device.h"\n#include "diagnostics.h"'),
+    # Asked for in the launcher, yet nothing generated and none of the reasons below said why
+    # (Ocarina of Time, AMD FSR 3, 2x): say so when it is off here.
+    ("""    if (unavailable || !Settings::values.frame_gen.GetValue()) {
+        if (chain || fsr3_chain) {""",
+     """    if ((unavailable || !Settings::values.frame_gen.GetValue()) && !idle_reported) {
+        idle_reported = true;
+        Eden::Report("framegen", ("not running here: setting " +
+                                  std::to_string(Settings::values.frame_gen.GetValue()) + ", unavailable " +
+                                  std::to_string(unavailable)).c_str());
+    }
+    if (unavailable || !Settings::values.frame_gen.GetValue()) {
+        if (chain || fsr3_chain) {"""),
     ("""    if (!shaders->IsValid() && Settings::values.frame_gen_type.GetValue() != Settings::FrameGenType::Fsr3) {
         unavailable = true;
         return;
@@ -1639,6 +1652,14 @@ adapt('src/video_core/renderer_vulkan/present/frame_gen.cpp', 'vulkan_frame_gen.
     # The gates above only say why it is not running; this says that it is.
     ("""    generated = warm && warm_streak >= LSFG_RECURRENCE_FRAMES && plan.generations > 0;""",
      """    generated = warm && warm_streak >= LSFG_RECURRENCE_FRAMES && plan.generations > 0;
+    // What the pacer plans, every 1800 frames: when nothing is generated, which step holds it.
+    if (++status_frames % 1800 == 1) {
+        Eden::Report("framegen", ("frame " + std::to_string(count) + ": plan " +
+                                  std::to_string(plan.generations) + ", warm " + std::to_string(plan.warm) +
+                                  ", streak " + std::to_string(warm_streak) + ", chain " +
+                                  std::to_string(fsr3_chain.has_value() || chain.has_value()) +
+                                  ", generated " + std::to_string(generated)).c_str());
+    }
     if (generated && !generation_reported) {
         generation_reported = true;
         Eden::Report("framegen",

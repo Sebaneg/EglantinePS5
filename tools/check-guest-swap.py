@@ -386,6 +386,37 @@ int main(int argc, char** argv) {
     for (std::size_t slot = 0; slot < Written; ++slot)
         if (slot != 3 && !Verify(base, slot, 50)) return 1;
 
+    // Compressed ahead of a shortage (swap_adelantado=N): with less free than that but more than the
+    // 1 GiB the swap starts at, the slots nobody touched that compress (the odd ones) go into memory,
+    // the others stay, and nothing goes to the file.
+    if (Common::CanPack()) {
+        const auto state_of = [&](std::size_t slot) { return Common::GuestMemorySlotState(slot * Common::SparseSlot); };
+        const std::size_t in_file = Common::SwapHeld().load();
+        const std::size_t out_before_ahead = Count(Slots, 5);
+        Common::pack_ahead_bytes.store(std::size_t{4096} << 20);
+        mock::largest_override = std::int64_t{2} << 30; mock::free_override = std::int64_t{2} << 30;
+        WaitFor("the compressible slots to be compressed ahead", [&] {
+            for (std::size_t slot = 5; slot < Written; slot += 2) if (state_of(slot) != 5) return false;
+            return true;
+        }, 30);
+        Common::pack_ahead_bytes.store(0);
+        mock::largest_override = std::int64_t{3} << 30; mock::free_override = std::int64_t{3} << 30;
+        if (Common::SwapHeld().load() != in_file) {
+            std::fprintf(stderr, "compressed ahead, yet %zu slots went to the file\n", Common::SwapHeld().load() - in_file);
+            return 1;
+        }
+        for (std::size_t slot = 4; slot < Written; slot += 2)
+            if (state_of(slot) == 5) { std::fprintf(stderr, "slot %zu does not compress, yet went out ahead\n", slot); return 1; }
+        const std::size_t ahead_out = Count(Slots, 5) - out_before_ahead;
+        for (std::size_t slot = 0; slot < Written; ++slot)
+            if (slot != 3 && !Verify(base, slot, 50)) return 1;
+        // The slots that did not compress were left alone for 5 minutes: not in the cases below.
+        if (Common::SparseRange* range = Common::service_range.load(); range != nullptr && range->hot_until != nullptr)
+            for (std::size_t slot = 0; slot < Slots; ++slot) range->hot_until[slot] = 0;
+        std::printf("ahead: %zu slots compressed into memory before a shortage, none to the file, every byte back\n",
+                    ahead_out);
+    }
+
     // Memory the game uses again stays in memory (swap_caliente=N): slots read back from the file
     // are not sent out again while the pool stays short, the others are; an emergency still takes them.
     Common::swap_hot_seconds.store(120);

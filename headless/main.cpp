@@ -1119,6 +1119,18 @@ int main(int argc, char** argv) {
             const auto cheats_on = Eden::LoadChosenCheats(title);
             Eden::Cheats::Off() = Eden::Mods::CheatsOff(all_mods, cheats_on);
             const std::string mods = Eden::Mods::Summary(all_mods, mods_off, cheats_on);
+            // env=EDEN_ADDONS_OFF=<name>[;<name>...]: Add-Ons the core applies by default, off by
+            // name. Ocarina of Time's "Max Resolution (built-in)" keeps its 3D at full scale; off,
+            // the game's own dynamic resolution lowers it when the GPU is behind (it ran at 27 FPS
+            // at 1x on the console, GPU-bound).
+            if (const char* off = std::getenv("EDEN_ADDONS_OFF"); off != nullptr) {
+                std::string names{off};
+                for (std::size_t start = 0; start <= names.size();) {
+                    const std::size_t end = std::min(names.find(';', start), names.size());
+                    if (end > start) mods_off.push_back(names.substr(start, end - start));
+                    start = end + 1;
+                }
+            }
             Settings::values.disabled_addons[title] = mods_off;
             Eden::Report("launch", ("Mods: " + mods).c_str());
             Eden::Crash::SetSession("game " + std::filesystem::path(guest).filename().string() + " (" + title_id +
