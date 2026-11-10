@@ -131,6 +131,12 @@ if(EDEN_PS5_FRAMEGEN)
         renderer_vulkan/present/lsfg_gamma.cpp
         renderer_vulkan/present/lsfg_generate.cpp
         renderer_vulkan/present/lsfg_mipmaps.cpp)
+    # Lichii's ENABLE_LSFG is an ordinary option now (on), so upstream already lists these, the two
+    # originals among them: both copies went into libvideo_core.a and the link took the original,
+    # without the diagnostics, so a session that asked for frame generation and got none said nothing.
+    # (target_sources may have stored them with the full path.)
+    list(FILTER video_sources EXCLUDE REGEX "(^|/)renderer_vulkan/present/(frame_gen|lsfg_shaders)\\.cpp$")
+    list(REMOVE_DUPLICATES video_sources)
     # Eden's own gate for those sources. PUBLIC, exactly as upstream declares it
     # (src/video_core/CMakeLists.txt): the flag changes members of RendererVulkan
     # and PresentManager, so every consumer of their headers must see the same

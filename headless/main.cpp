@@ -1130,6 +1130,7 @@ int main(int argc, char** argv) {
                     if (end > start) mods_off.push_back(names.substr(start, end - start));
                     start = end + 1;
                 }
+                Eden::Report("launch", (std::string{"Add-Ons off by name: "} + off).c_str());
             }
             Settings::values.disabled_addons[title] = mods_off;
             Eden::Report("launch", ("Mods: " + mods).c_str());
