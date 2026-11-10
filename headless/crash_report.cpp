@@ -763,6 +763,169 @@ void HitchWatch() {
     }
 }
 
+// GPU thread samples (lab file muestras_gpu=on, EDEN_GPU_SAMPLES=N ms between samples, 2 to 50):
+// where the GPU thread spends its time, by code address, when the zone profile (medir=on) only
+// says which part. Every N ms the thread takes SIGUSR2; the handler counts the interrupted address
+// (16-byte buckets) and each of the app's code addresses on its stack (up to 8 in 8 KiB, once per
+// sample). Every 20 s one EDEN_GPU_SAMPLES line per table with the 60 biggest counts, then the
+// tables start again. tools/symbolize-crash.py reads the eboot+0x addresses; stack addresses
+// include stale ones, the interrupted address is exact.
+constexpr std::size_t kSampleSlots = 4096;
+struct SampleTable {
+    std::uint64_t key[kSampleSlots];
+    std::uint32_t count[kSampleSlots];
+};
+SampleTable sample_self, sample_stack;
+std::atomic<std::uintptr_t> sample_target{0};
+std::atomic<bool> sample_done{false};
+std::uint64_t sample_words[512];
+unsigned long long sample_lost = 0;
+
+void SampleAdd(SampleTable& table, std::uint64_t key) noexcept {
+    std::size_t i = static_cast<std::size_t>((key * 0x9E3779B97F4A7C15ULL) >> 52);
+    for (int probe = 0; probe < 64; ++probe, i = (i + 1) & (kSampleSlots - 1)) {
+        if (table.key[i] == key) {
+            ++table.count[i];
+            return;
+        }
+        if (table.key[i] == 0) {
+            table.key[i] = key;
+            table.count[i] = 1;
+            return;
+        }
+    }
+    ++sample_lost;
+}
+
+void SampleSignal(int, siginfo_t*, void* context) {
+    const int saved = errno;
+    if ((std::uintptr_t)pthread_self() != sample_target.load(std::memory_order_acquire)) {
+        errno = saved;
+        return;
+    }
+    const Registers r = FromContext(context);
+    SampleAdd(sample_self, (r.rip & ~std::uint64_t{15}) | 1);
+    std::uint64_t calls[8];
+    unsigned found = 0;
+    std::uint64_t at = r.rsp & ~std::uint64_t{7};
+    for (std::size_t seen = 0; r.rsp != 0 && seen < 1024 && found < 8;) {
+        const std::size_t bytes = std::min<std::size_t>(4096 - (at & 4095), sizeof(sample_words));
+        if (!Copy(reinterpret_cast<const void*>(at), sample_words, bytes)) break;
+        for (std::size_t i = 0; i < bytes / 8 && found < 8; ++i) {
+            const std::uint64_t value = sample_words[i];
+            if (!InCode(value) || value < CodeStart() + 8) continue;
+            bool repeated = false;
+            for (unsigned j = 0; j < found; ++j) repeated = repeated || calls[j] == value;
+            if (repeated) continue;
+            calls[found++] = value;
+            SampleAdd(sample_stack, value);
+        }
+        at += bytes;
+        seen += bytes / 8;
+    }
+    sample_done.store(true, std::memory_order_release);
+    errno = saved;
+}
+
+void PrintSamples(const char* what, SampleTable& table, unsigned long long samples) {
+    Text<4096> line;
+    line.Clear();
+    line.Put("EDEN_GPU_SAMPLES ");
+    line.Put(what);
+    line.Put(" samples=");
+    line.Dec(samples);
+    line.Put(" lost=");
+    line.Dec(sample_lost);
+    line.Put(':');
+    for (int top = 0; top < 60; ++top) {
+        std::size_t best = kSampleSlots;
+        for (std::size_t i = 0; i < kSampleSlots; ++i)
+            if (table.key[i] != 0 && table.count[i] != 0 && (best == kSampleSlots || table.count[i] > table.count[best]))
+                best = i;
+        if (best == kSampleSlots) break;
+        line.Put(' ');
+        line.Address(table.key[best] & ~std::uint64_t{1});
+        line.Put('=');
+        line.Dec(table.count[best]);
+        table.count[best] = 0;
+    }
+    std::fprintf(stderr, "%s\n", line.data);
+    for (std::size_t i = 0; i < kSampleSlots; ++i) {
+        table.key[i] = 0;
+        table.count[i] = 0;
+    }
+}
+
+void GpuSampleWatch() {
+    using Clock = std::chrono::steady_clock;
+    bool handler = false, was_running = false;
+    unsigned interval_ms = 0;
+    bool showing = false;
+    unsigned long long samples = 0;
+    Clock::time_point first_frames{}, window_start{};
+    for (;;) {
+        Sleep(interval_ms != 0 && was_running ? interval_ms * 1000 : 200000);
+        if (state.load(std::memory_order_acquire) != kIdle) return;
+        if (!game_running.load(std::memory_order_acquire)) {
+            was_running = false;
+            continue;
+        }
+        if (!was_running) {
+            was_running = true;
+            interval_ms = 0;
+            if (const char* value = std::getenv("EDEN_GPU_SAMPLES"))
+                interval_ms = static_cast<unsigned>(std::strtoul(value, nullptr, 10));
+            if (interval_ms != 0) interval_ms = std::clamp(interval_ms, 2u, 50u);
+            showing = false;
+            samples = 0;
+            if (interval_ms != 0)
+                std::fprintf(stderr, "EDEN_GPU_SAMPLES on: the GPU thread every %u ms once frames show\n", interval_ms);
+        }
+        if (interval_ms == 0) continue;
+        // Signals during a boot hung it (as the hitch watch): only after 20 s of frames.
+        if (!showing) {
+            if (frames_shown.load(std::memory_order_relaxed) == 0) continue;
+            showing = true;
+            first_frames = Clock::now();
+        }
+        if (Clock::now() - first_frames < std::chrono::seconds(20)) {
+            window_start = Clock::now();
+            continue;
+        }
+        if (!handler) {
+            struct sigaction action {};
+            action.sa_sigaction = SampleSignal;
+            action.sa_flags = SA_SIGINFO | SA_RESTART;
+            sigemptyset(&action.sa_mask);
+            if (sigaction(SIGUSR2, &action, nullptr) != 0) {
+                std::fprintf(stderr, "EDEN_GPU_SAMPLES the signal handler was refused; sampling stops\n");
+                interval_ms = 0;
+                continue;
+            }
+            handler = true;
+        }
+        std::uintptr_t thread = 0;
+        for (const NamedThread& entry : named_threads)
+            if (!std::strcmp(entry.name, "GPU")) thread = entry.thread.load(std::memory_order_acquire);
+        if (thread == 0) continue;
+        sample_done.store(false, std::memory_order_relaxed);
+        sample_target.store(thread, std::memory_order_release);
+        if (pthread_kill((pthread_t)thread, SIGUSR2) == 0) {
+            for (int i = 0; i < 200 && !sample_done.load(std::memory_order_acquire); ++i) Sleep(100);
+        }
+        sample_target.store(0, std::memory_order_release);
+        if (sample_done.load(std::memory_order_acquire)) ++samples;
+        if (Clock::now() - window_start >= std::chrono::seconds(20)) {
+            PrintSamples("self", sample_self, samples);
+            PrintSamples("stack", sample_stack, samples);
+            std::fflush(stderr);
+            samples = 0;
+            sample_lost = 0;
+            window_start = Clock::now();
+        }
+    }
+}
+
 void CopyText(char* target, std::size_t size, const char* text) noexcept {
     std::size_t length = 0;
     for (; text && text[length] && length + 1 < size; ++length) target[length] = text[length];
@@ -803,6 +966,7 @@ void Install(const std::string& logs_folder, const char* app_version, bool resta
     std::thread(Flusher).detach();
     std::thread(FreezeWatch).detach();
     std::thread(HitchWatch).detach();
+    std::thread(GpuSampleWatch).detach();
     struct sigaction action {};
     action.sa_sigaction = Handle;
     action.sa_flags = SA_SIGINFO;

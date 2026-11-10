@@ -255,6 +255,10 @@ inline bool ApplyEarly(const std::string& entry, bool& block_list_set) {
     // where the GPU, Vulkan and guest core threads are, in EDEN_HITCH lines. Read as the game starts.
     else if (entry.starts_with("tirones=") && Number(entry, 8, n) && n >= 300 && n <= 10000)
         SetVariable("EDEN_HITCH_MS", entry.c_str() + 8);
+    // muestras_gpu=on: where the GPU thread spends its time by code address, a sample every 4 ms
+    // after 20 s of frames, EDEN_GPU_SAMPLES lines every 20 s (crash_report.cpp GpuSampleWatch).
+    // Read as the game starts.
+    else if (entry == "muestras_gpu=on") SetVariable("EDEN_GPU_SAMPLES", "4");
     // Picture quality, read when the game's renderer starts. anisotropico=N (2, 4, 8 or 16; 0: what the
     // game asks): textures seen at an angle (the track ahead) stay sharp. aa=off|fxaa|smaa: the
     // anti-aliasing pass on the output (fxaa without the line). nitidez_fsr=N (0 to 200, 25 without the
