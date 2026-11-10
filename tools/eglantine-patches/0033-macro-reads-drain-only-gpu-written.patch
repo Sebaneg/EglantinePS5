@@ -1,0 +1,28 @@
+diff --git a/src/video_core/engines/maxwell_3d.cpp b/src/video_core/engines/maxwell_3d.cpp
+index 86fb6d24ac..aa6b2fdf09 100644
+--- a/src/video_core/engines/maxwell_3d.cpp
++++ b/src/video_core/engines/maxwell_3d.cpp
+@@ -1357,7 +1357,22 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
+         memory_manager.ReadBlockUnsafe(source, diag_before.data(), read_bytes);
+     }
+     VideoCommon::Nx2Profile::CountDmaRead(macro);
+-    split.Drain(VideoCommon::DrainSite::MacroDmaRead);
++    // EDEN_NX2_MACRO_READ_FAST=1 (lab file lecturas_macro=rapidas): the back is caught up only when
++    // a page read was ever written by the GPU (Nx2IsGpuWritten, as the front's command list reads
++    // do); the others hold what the game wrote, which nothing queued for the back changes. Ocarina
++    // of Time drained here 11,000 times a second, 28% of the front's time.
++    static const bool fast_reads = [] {
++        const char* value = std::getenv("EDEN_NX2_MACRO_READ_FAST");
++        return value != nullptr && value[0] == '1';
++    }();
++    bool drain = !fast_reads || !Tegra::g_nx2_ampere.load(std::memory_order_relaxed);
++    for (GPUVAddr page = source & ~GPUVAddr{0xfff}; !drain && page < source + read_bytes; page += 0x1000) {
++        const auto device = memory_manager.GpuToCpuAddress(page);
++        drain = !device || Tegra::Nx2IsGpuWritten(*device);
++    }
++    if (drain) {
++        split.Drain(VideoCommon::DrainSite::MacroDmaRead);
++    }
+     if (VideoCommon::QueryDma::TraceEnabled()) {
+         split.Run(
+             [this, macro, method, source, read_bytes] {
