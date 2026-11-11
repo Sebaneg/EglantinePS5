@@ -769,13 +769,15 @@ void HitchWatch() {
 // (16-byte buckets) and each of the app's code addresses on its stack (up to 8 in 8 KiB, once per
 // sample). Every 20 s one EDEN_GPU_SAMPLES line per table with the 60 biggest counts, then the
 // tables start again. tools/symbolize-crash.py reads the eboot+0x addresses; stack addresses
-// include stale ones, the interrupted address is exact.
+// include stale ones, the interrupted address is exact. When the thread is stopped outside the app's
+// code (a system call: a lock, a wait), the "outside" tables count the nearest one and two app
+// addresses on its stack, the calls that led there.
 constexpr std::size_t kSampleSlots = 4096;
 struct SampleTable {
     std::uint64_t key[kSampleSlots];
     std::uint32_t count[kSampleSlots];
 };
-SampleTable sample_self, sample_stack;
+SampleTable sample_self, sample_stack, sample_outside, sample_outside2;
 std::atomic<std::uintptr_t> sample_target{0};
 std::atomic<bool> sample_done{false};
 std::uint64_t sample_words[512];
@@ -822,6 +824,10 @@ void SampleSignal(int, siginfo_t*, void* context) {
         }
         at += bytes;
         seen += bytes / 8;
+    }
+    if (!InCode(r.rip)) {
+        if (found > 0) SampleAdd(sample_outside, calls[0]);
+        if (found > 1) SampleAdd(sample_outside2, calls[1]);
     }
     sample_done.store(true, std::memory_order_release);
     errno = saved;
@@ -918,6 +924,8 @@ void GpuSampleWatch() {
         if (Clock::now() - window_start >= std::chrono::seconds(20)) {
             PrintSamples("self", sample_self, samples);
             PrintSamples("stack", sample_stack, samples);
+            PrintSamples("outside", sample_outside, samples);
+            PrintSamples("outside2", sample_outside2, samples);
             std::fflush(stderr);
             samples = 0;
             sample_lost = 0;
